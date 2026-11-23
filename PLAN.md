@@ -20,6 +20,14 @@ Each slice maps to one or more issues in the issue tracker (see
   codec/size/bitrate), thumbnail (ffmpeg), copy-stream HLS segmentation
   (`hls/{id}/playlist.m3u8` + `.ts` segments), SQLite index; `/stream/*path`
   and `/thumbnail/*path` serve the assets; dedupe prevents re-import.
+- **S3** (Phase 3): YouTube import. Paste a YouTube URL or playlist in the
+  Admin tab → videos appear in Library with a matching playlist in the
+  Playlist tab. Verified end-to-end: `yt-dlp` integration (single URL +
+  playlist), download to `youtube_download_dir`, ingest via the Phase 2
+  pipeline (dedupe, ffprobe, thumbnail, HLS), playlist auto-create
+  (`source="youtube"`, `youtube_url` set, items in order), `/api/import`
+  endpoint (admin-auth), `/api/playlists` and `/api/playlists/{id}`
+  endpoints.
 
 ## Phase 0 — Repo & tooling setup
 

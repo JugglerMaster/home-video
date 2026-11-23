@@ -11,6 +11,8 @@ use axum::{
     Router,
 };
 use axum::body::{Body, Bytes};
+use http_body_util::BodyExt;
+
 use axum::http::Request;
 use tower_http::trace::TraceLayer;
 
@@ -29,6 +31,7 @@ use crate::config;
 use crate::config::Config;
 use crate::db::Db;
 use crate::ingest;
+use crate::import;
 
 const STATIC_DIR: &str = "./static";
 const CONFIG_PATH_DEFAULT: &str = "./config.json";
@@ -140,7 +143,7 @@ async fn serve_file(name: &str) -> Response {
 }
 
 /// The `session` cookie value, if present.
-fn session_token(req: &Request<Body>) -> Option<String> {
+fn session_token<T>(req: &Request<T>) -> Option<String> {
     req.headers()
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -152,7 +155,7 @@ fn session_token(req: &Request<Body>) -> Option<String> {
         })
 }
 
-fn is_authenticated(state: &AppState, req: &Request<Body>) -> bool {
+fn is_authenticated<T>(state: &AppState, req: &Request<T>) -> bool {
     session_token(req)
         .as_deref()
         .map(|t| state.sessions.lock().unwrap().contains(t))
@@ -378,6 +381,212 @@ async fn list_videos(State(state): State<AppState>) -> Response {
     }
 }
 
+// ---------------------------------------------------------------------------
+// YouTube import (S3)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/import`.
+#[derive(Deserialize)]
+struct ImportRequest {
+    pub url: String,
+}
+
+/// POST /api/import → import a YouTube URL (single video or playlist).
+/// Admin-only.
+async fn import_post(State(state): State<AppState>, req: Request<Body>) -> Response {
+    if !is_authenticated(&state, &req) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error": "not authenticated"}));
+    }
+    let body_bytes = req.into_body().collect().await.expect("collect body").to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let body: ImportRequest = match serde_json::from_str(&body_str) {
+        Ok(b) => b,
+        Err(e) => return json_response(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    };
+    let url = body.url.trim().to_string();
+    if url.is_empty() {
+        return json_response(StatusCode::BAD_REQUEST, json!({"error": "url is required"}));
+    }
+    match import::import(&state, &url).await {
+        Ok(result) => json_response(
+            StatusCode::OK,
+            json!({
+                "ingested": result.ingested,
+                "playlist_id": result.playlist_id,
+                "playlist_title": result.playlist_title,
+            }),
+        ),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": e.to_string()}),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playlists (S3/S5)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AddItemRequest {
+    pub video_id: u64,
+}
+
+#[derive(Deserialize)]
+struct RemoveItemRequest {
+    pub video_id: u64,
+}
+
+/// GET /api/playlists → all playlists.
+async fn list_playlists(State(state): State<AppState>) -> Response {
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.get_playlists() {
+            Ok(playlists) => {
+                let json_playlists: Vec<serde_json::Value> = playlists
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "id": p.id,
+                            "name": p.name,
+                            "source": p.source,
+                            "youtube_url": p.youtube_url,
+                            "created_at": p.created_at,
+                        })
+                    })
+                    .collect();
+                json_response(StatusCode::OK, json!(json_playlists))
+            }
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// GET /api/playlists/{id} → playlist detail with its videos.
+async fn get_playlist(
+    State(state): State<AppState>,
+    PathExtract(id): PathExtract<u64>,
+) -> Response {
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => {
+            let playlist = match db.get_playlist(id) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return json_response(StatusCode::NOT_FOUND, json!({"error": "not found"}));
+                }
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": e.to_string()}),
+                    );
+                }
+            };
+            let videos = match db.get_videos_by_playlist(id) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": e.to_string()}),
+                    );
+                }
+            };
+            let json_videos: Vec<serde_json::Value> = videos
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "id": v.id,
+                        "title": v.title,
+                        "duration": v.duration,
+                        "resolution": v.resolution,
+                        "codec": v.codec,
+                        "thumbnail": format!("/thumbnail/{}.jpg", v.id),
+                        "m3u8": format!("/stream/{}/playlist.m3u8", v.id),
+                    })
+                })
+                .collect();
+            json_response(
+                StatusCode::OK,
+                json!({
+                    "id": playlist.id,
+                    "name": playlist.name,
+                    "source": playlist.source,
+                    "youtube_url": playlist.youtube_url,
+                    "created_at": playlist.created_at,
+                    "videos": json_videos,
+                }),
+            )
+        }
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// POST /api/playlists/{id}/items → add a video to a playlist.
+async fn add_playlist_item(
+    State(state): State<AppState>,
+    PathExtract(id): PathExtract<u64>,
+    req: Request<Body>,
+) -> Response {
+    let body_bytes = req.into_body().collect().await.expect("collect body").to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let body: AddItemRequest = match serde_json::from_str(&body_str) {
+        Ok(b) => b,
+        Err(e) => return json_response(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    };
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.add_playlist_item(id, body.video_id, 0) {
+            Ok(()) => json_response(StatusCode::OK, json!({})),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// DELETE /api/playlists/{id}/items → remove a video from a playlist.
+async fn remove_playlist_item(
+    State(state): State<AppState>,
+    PathExtract(id): PathExtract<u64>,
+    req: Request<Body>,
+) -> Response {
+    let body_bytes = req.into_body().collect().await.expect("collect body").to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let body: RemoveItemRequest = match serde_json::from_str(&body_str) {
+        Ok(b) => b,
+        Err(e) => return json_response(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    };
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.remove_playlist_item(id, body.video_id) {
+            Ok(()) => json_response(StatusCode::OK, json!({})),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
 /// Serve a file from the data dir (hls or thumbnail) by relative name, or 404.
 /// Read a file under `data_dir/{prefix}/{path}`, serving it with the right
 /// content type. `prefix` is `hls` for streams and `thumbnails` for
@@ -505,6 +714,13 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/admin/logout", post(logout))
         .route("/api/session", get(session))
         .route("/api/videos", get(list_videos))
+        .route("/api/import", post(import_post))
+        .route("/api/playlists", get(list_playlists))
+        .route("/api/playlists/{id}", get(get_playlist))
+        .route(
+            "/api/playlists/{id}/items",
+            post(add_playlist_item).delete(remove_playlist_item),
+        )
         .route("/stream/*path", get(stream_file))
         .route("/thumbnail/*path", get(thumbnail_file))
         .route("/health", get(|| async { "ok".to_string() }))

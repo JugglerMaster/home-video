@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod hls;
+mod import;
 mod ingest;
 mod server;
 

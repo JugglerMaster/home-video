@@ -223,7 +223,7 @@ pub fn hls(src: &Path, out_dir: &Path) -> Result<()> {
 }
 
 /// Ingest a single video file into the app.
-pub async fn ingest(state: &AppState, path: &Path) -> Result<()> {
+pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
     let fp = fingerprint(path)?;
 
     // Dedupe.
@@ -231,7 +231,7 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<()> {
         let db_guard = state.db.lock().unwrap();
         if let Some(db) = db_guard.as_ref() {
             if db.find_by_fingerprint(&fp)?.is_some() {
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -299,7 +299,7 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<()> {
     }
 
     println!("ingested {} (id={})", path.display(), video_id);
-    Ok(())
+    Ok(Some(video_id))
 }
 
 /// Run a full scan of all watch dirs.
@@ -316,8 +316,10 @@ pub async fn scan(state: &AppState) -> Result<usize> {
     let files = scan_video_files(&dirs);
     let mut ingested = 0;
     for f in files {
-        if ingest(state, &f).await.is_ok() {
-            ingested += 1;
+        match ingest(state, &f).await {
+            Ok(Some(_)) => ingested += 1,
+            Ok(None) => {}
+            Err(e) => eprintln!("scan ingest error for {:?}: {e}", f),
         }
     }
     Ok(ingested)

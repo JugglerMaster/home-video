@@ -42,6 +42,17 @@ fn now() -> String {
     format!("{}.{}", t.as_secs(), t.subsec_nanos() / 1_000_000)
 }
 
+/// A playlist as stored in the `playlists` table.
+#[derive(Clone, Debug)]
+pub struct Playlist {
+    pub id: u64,
+    pub name: String,
+    pub source: String,
+    pub youtube_url: Option<String>,
+    pub created_at: String,
+}
+
+
 impl Db {
     /// Open (or create) the database at `path`.
     pub fn new(path: &std::path::Path) -> anyhow::Result<Self> {
@@ -176,6 +187,106 @@ impl Db {
         self.conn.execute(
             "UPDATE videos SET hls_m3u8 = ?1, thumbnail_path = ?2, updated_at = ?3 WHERE id = ?4",
             params![hls_m3u8, thumbnail_path, now(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Create a playlist. Returns the new playlist id.
+    pub fn create_playlist(&self, name: &str, source: &str, youtube_url: Option<&str>) -> anyhow::Result<u64> {
+        self.conn.execute(
+            "INSERT INTO playlists (name, source, youtube_url, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![name, source, youtube_url, now()],
+        )?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    /// List all playlists.
+    pub fn get_playlists(&self) -> anyhow::Result<Vec<Playlist>> {
+        let mut stmt = self.conn
+            .prepare("SELECT id, name, source, youtube_url, created_at FROM playlists ORDER BY id DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Playlist {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source: row.get(2)?,
+                youtube_url: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Get a single playlist.
+    pub fn get_playlist(&self, id: u64) -> anyhow::Result<Option<Playlist>> {
+        let mut stmt = self.conn
+            .prepare("SELECT id, name, source, youtube_url, created_at FROM playlists WHERE id = ?1")?;
+        match stmt.query_row(params![id], |row| {
+            Ok(Playlist {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source: row.get(2)?,
+                youtube_url: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        }) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("get_playlist: {e}")),
+        }
+    }
+
+    /// Get the videos in a playlist, in position order.
+    pub fn get_videos_by_playlist(&self, playlist_id: u64) -> anyhow::Result<Vec<Video>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.* FROM playlist_items pi
+             JOIN videos v ON v.id = pi.video_id
+             WHERE pi.playlist_id = ?1
+             ORDER BY pi.position ASC",
+        )?;
+        let rows = stmt.query_map(params![playlist_id], |row| {
+            Ok(Video {
+                id: row.get(0)?,
+                fingerprint: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                description: row.get(4)?,
+                tags: row.get(5)?,
+                duration: row.get(6)?,
+                resolution: row.get(7)?,
+                codec: row.get(8)?,
+                size: row.get(9)?,
+                bitrate: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+                hls_m3u8: row.get(13)?,
+                thumbnail_path: row.get(14)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Add a video to a playlist (no-op if already present).
+    pub fn add_playlist_item(&self, playlist_id: u64, video_id: u64, position: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO playlist_items (playlist_id, video_id, position) VALUES (?1, ?2, ?3)",
+            params![playlist_id, video_id, position],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a video from a playlist.
+    pub fn remove_playlist_item(&self, playlist_id: u64, video_id: u64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1 AND video_id = ?2",
+            params![playlist_id, video_id],
         )?;
         Ok(())
     }
