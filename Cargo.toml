@@ -1,0 +1,13 @@
+[package]
+name = "home-video"
+version = "0.1.0"
+edition = "2021"
+description = "Home video library web server (collect, index, stream)."
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.5", features = ["trace", "cors"] }

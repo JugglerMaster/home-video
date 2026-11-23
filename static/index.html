@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>home-video</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>home-video</h1>
+    <nav id="tabs">
+      <a href="#" class="tab-link active" data-tab="library">Library</a>
+      <a href="#" class="tab-link" data-tab="video">Video</a>
+      <a href="#" class="tab-link" data-tab="playlist">Playlist</a>
+      <a href="#" class="tab-link" data-tab="admin">Admin</a>
+    </nav>
+  </header>
+  <main id="main">
+    <section id="tab-library" class="tab active">
+      <h2>Library</h2>
+      <p class="placeholder">Videos appear here once imported.</p>
+    </section>
+    <section id="tab-video" class="tab">
+      <h2>Video</h2>
+      <p class="placeholder">Select a video to play.</p>
+    </section>
+    <section id="tab-playlist" class="tab">
+      <h2>Playlist</h2>
+      <p class="placeholder">Playlists appear here.</p>
+    </section>
+    <section id="tab-admin" class="tab">
+      <h2>Admin</h2>
+      <p class="placeholder">Admin controls appear here.</p>
+    </section>
+  </main>
+  <footer>
+    <span id="status">status: <span id="health">checking&hellip;</span></span>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

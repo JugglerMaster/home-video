@@ -1,0 +1,15 @@
+# Rust
+/target
+Cargo.lock
+
+# Config (contains the admin password hash)
+config.json
+*.local
+
+# OS
+.DS_Store
+*.swp
+*~
+
+# Scratch (local-markdown issue tracker, if ever used)
+.scratch/
