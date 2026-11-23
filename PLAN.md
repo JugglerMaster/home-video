@@ -5,6 +5,15 @@ through schema → API → UI → tests, so the app is usable after every one.
 Each slice maps to one or more issues in the issue tracker (see
 `docs/agents/issue-tracker.md`).
 
+## Completed
+
+- **S0** (Phase 0): empty crate compiles, server boots, serves static index page.
+- **S1** (Phase 1): setup wizard + config + auth. Fresh container shows the
+  wizard; completing it writes `config.json` (argon2 hash), creates the schema,
+  and the admin page is reachable (other routes 403 until complete). Verified
+  end-to-end: `/setup` POST, `/admin/login` sets HttpOnly cookie, `/api/session`
+  true→false after logout, wrong password rejected.
+
 ## Phase 0 — Repo & tooling setup
 
 - `git init`, `.gitignore`, `README.md`.
