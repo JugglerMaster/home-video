@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>home-video — Admin</title>
+  <style>
+    :root { --bg:#111; --fg:#e6e6e6; --accent:#4f9bff; --card:#1e1e1e; --err:#ff5c5c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg);
+           display:flex; align-items:center; justify-content:center; min-height:100vh; }
+    .card { background:var(--card); border-radius:10px; padding:28px; width:100%; max-width:520px;
+           box-shadow:0 8px 32px rgba(0,0,0,.5); }
+    h1 { font-size:1.4rem; margin:0 0 4px; }
+    .sub { color:#888; font-size:.9rem; margin:0 0 20px; }
+    label { display:block; font-size:.85rem; margin:14px 0 4px; }
+    input { width:100%; background:#242424; color:var(--fg); border:1px solid #3a3a3a;
+            border-radius:6px; padding:10px; font:inherit; }
+    input:focus { outline:none; border-color:var(--accent); }
+    button { margin-top:18px; width:100%; padding:12px; background:var(--accent); color:#fff;
+             border:0; border-radius:6px; font:inherit; font-weight:600; cursor:pointer; }
+    button.secondary { background:#2a2a2a; color:var(--fg); margin-top:8px; }
+    .error { color:var(--err); font-size:.85rem; margin-top:12px; min-height:1em; }
+    .row { display:flex; justify-content:space-between; align-items:center; margin:14px 0;
+           border-top:1px solid #2c2c2c; padding:12px 0; }
+    .row .label { color:#999; font-size:.85rem; }
+    .row .val { font-size:.9rem; }
+    .placeholder { color:#888; font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Admin</h1>
+    <p class="sub">Manage the library. Requires the admin password.</p>
+
+    <!-- Login form (shown when not authenticated) -->
+    <div id="login">
+      <label>Admin password
+        <input id="password" type="password" autocomplete="current-password">
+      </label>
+      <button id="login-btn" type="button">Sign in</button>
+      <p class="error" id="login-error"></p>
+    </div>
+
+    <!-- Dashboard (shown when authenticated) -->
+    <div id="dashboard" style="display:none;">
+      <div class="row">
+        <span class="label">Status</span>
+        <span class="val" id="status-val">authenticated</span>
+      </div>
+      <div class="row">
+        <span class="label">Anonymous view</span>
+        <span class="val" id="anon-val">—</span>
+      </div>
+      <p class="placeholder">Settings (watch dirs, data dir, scan interval, delete, import) land in S6.</p>
+      <button id="logout-btn" class="secondary" type="button">Sign out</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+      var loginEl = document.getElementById("login");
+      var dashEl = document.getElementById("dashboard");
+      var loginErr = document.getElementById("login-error");
+
+      function showAuthed() { loginEl.style.display = "none"; dashEl.style.display = "block"; }
+      function showLogin() { dashEl.style.display = "none"; loginEl.style.display = "block"; }
+
+      fetch("/api/session")
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.authenticated) { showAuthed(); loadSettings(); }
+          else { showLogin(); }
+        })
+        .catch(function () { showLogin(); });
+
+      function loadSettings() {
+        fetch("/admin")
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j.anonymous_view !== undefined) {
+              document.getElementById("anon-val").textContent = j.anonymous_view ? "on" : "off";
+            }
+          })
+          .catch(function () { /* no settings endpoint yet (S6) */ });
+      }
+
+      document.getElementById("login-btn").addEventListener("click", function () {
+        var password = document.getElementById("password").value;
+        loginErr.textContent = "";
+        fetch("/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: password })
+        })
+        .then(function (r) {
+          if (r.status === 401) { loginErr.textContent = "Invalid password."; return r.json(); }
+          return r.json().then(function () { showAuthed(); loadSettings(); });
+        })
+        .catch(function () { loginErr.textContent = "Login failed."; });
+      });
+
+      document.getElementById("logout-btn").addEventListener("click", function () {
+        fetch("/admin/logout", { method: "POST" }).then(function () { location.reload(); });
+      });
+    })();
+  </script>
+</body>
+</html>

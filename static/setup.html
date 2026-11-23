@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>home-video — Setup</title>
+  <style>
+    :root { --bg:#111; --fg:#e6e6e6; --accent:#4f9bff; --card:#1e1e1e; --err:#ff5c5c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg);
+           display:flex; align-items:center; justify-content:center; min-height:100vh; }
+    .card { background:var(--card); border-radius:10px; padding:28px; width:100%; max-width:520px;
+           box-shadow:0 8px 32px rgba(0,0,0,.5); }
+    h1 { font-size:1.4rem; margin:0 0 4px; }
+    .sub { color:#888; font-size:.9rem; margin:0 0 20px; }
+    label { display:block; font-size:.85rem; margin:14px 0 4px; }
+    input, textarea { width:100%; background:#242424; color:var(--fg); border:1px solid #3a3a3a;
+                      border-radius:6px; padding:10px; font:inherit; }
+    input:focus, textarea:focus { outline:none; border-color:var(--accent); }
+    .hint { color:#777; font-size:.78rem; margin-top:3px; }
+    .checkbox { display:flex; align-items:center; gap:8px; margin-top:14px; }
+    .checkbox input { width:auto; }
+    button { margin-top:22px; width:100%; padding:12px; background:var(--accent); color:#fff;
+              border:0; border-radius:6px; font:inherit; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .error { color:var(--err); font-size:.85rem; margin-top:12px; min-height:1em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>home-video — first run</h1>
+    <p class="sub">Configure the library. This is shown once; you can re-edit it later from Admin &gt; Settings.</p>
+
+    <label>Admin password
+      <input id="admin_password" type="password" autocomplete="new-password" required>
+      <span class="hint">Stored hashed (argon2). You'll need it to reach Admin.</span>
+    </label>
+
+    <label>Watch folders (comma-separated)
+      <input id="watch_dirs" type="text" placeholder="/media/videos, /media/clips" required>
+      <span class="hint">Local folders scanned for videos (mounted read-only).</span>
+    </label>
+
+    <label>Data directory
+      <input id="data_dir" type="text" placeholder="/data/home-video" required>
+      <span class="hint">Writable dir for the DB, thumbnails, and generated HLS.</span>
+    </label>
+
+    <label>Scan interval (seconds)
+      <input id="scan_interval_s" type="number" min="1" value="30" required>
+    </label>
+
+    <div class="checkbox">
+      <input id="anonymous_view" type="checkbox">
+      <label for="anonymous_view" style="margin:0; color:inherit;">Allow anonymous (view-only) browsing</label>
+    </div>
+
+    <label>YouTube download dir (optional)
+      <input id="youtube_download_dir" type="text" placeholder="(default: data_dir/youtube)">
+    </label>
+
+    <button id="save" type="button">Save &amp; finish setup</button>
+    <p class="error" id="error"></p>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+      var btn = document.getElementById("save");
+      var err = document.getElementById("error");
+      btn.addEventListener("click", function () {
+        var payload = {
+          admin_password: document.getElementById("admin_password").value,
+          watch_dirs: document.getElementById("watch_dirs").value,
+          data_dir: document.getElementById("data_dir").value,
+          scan_interval_s: parseInt(document.getElementById("scan_interval_s").value, 10),
+          anonymous_view: document.getElementById("anonymous_view").checked,
+          youtube_download_dir: document.getElementById("youtube_download_dir").value || null
+        };
+        btn.disabled = true;
+        err.textContent = "";
+        fetch("/setup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+        .then(function (r) {
+          if (r.status === 302 || r.status === 307) { window.location.href = "/admin"; return r; }
+          return r.json().then(function (j) { throw new Error(j.error || r.statusText); });
+        })
+        .catch(function (e) { err.textContent = e.message; btn.disabled = false; });
+      });
+    })();
+  </script>
+</body>
+</html>
