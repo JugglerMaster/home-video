@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng;
@@ -27,6 +28,7 @@ use crate::auth;
 use crate::config;
 use crate::config::Config;
 use crate::db::Db;
+use crate::ingest;
 
 const STATIC_DIR: &str = "./static";
 const CONFIG_PATH_DEFAULT: &str = "./config.json";
@@ -40,15 +42,17 @@ pub struct AppState {
     pub port: u16,
     pub config: Arc<Mutex<Option<Config>>>,
     pub sessions: Arc<Mutex<HashSet<String>>>,
+    pub db: Arc<Mutex<Option<Db>>>,
 }
 
 impl AppState {
-    pub fn new(config_path: PathBuf, config: Option<Config>, port: u16) -> Self {
+    pub fn new(config_path: PathBuf, config: Option<Config>, port: u16, db: Option<Db>) -> Self {
         Self {
             config_path,
             port,
             config: Arc::new(Mutex::new(config)),
             sessions: Arc::new(Mutex::new(HashSet::new())),
+            db: Arc::new(Mutex::new(db)),
         }
     }
 }
@@ -248,12 +252,16 @@ async fn setup_post(
     }
 
     let db_path = PathBuf::from(&config.data_dir).join("home-video.db");
-    if let Err(e) = Db::new(&db_path).and_then(|db| db.create_schema().map(|_| ())) {
-        return json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": format!("init db: {e}")}),
-        );
-    }
+    let db = match Db::new(&db_path).and_then(|db| db.create_schema().map(|_| db)) {
+        Ok(db) => db,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": format!("create db: {e}")}),
+            );
+        }
+    };
+    *state.db.lock().unwrap() = Some(db);
 
     *state.config.lock().unwrap() = Some(config);
     redirect("/admin")
@@ -330,6 +338,101 @@ async fn static_handler(PathExtract(path): PathExtract<String>) -> Response {
     serve_file(&safe_name).await
 }
 
+// ---------------------------------------------------------------------------
+// Library / streaming (S2)
+// ---------------------------------------------------------------------------
+
+/// GET /api/videos → all videos (for the Library grid).
+async fn list_videos(State(state): State<AppState>) -> Response {
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.get_videos() {
+            Ok(videos) => {
+                let json_videos: Vec<serde_json::Value> = videos
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "id": v.id,
+                            "title": v.title,
+                            "duration": v.duration,
+                            "resolution": v.resolution,
+                            "codec": v.codec,
+                            "size": v.size,
+                            "bitrate": v.bitrate,
+                            "thumbnail": format!("/thumbnail/{}.jpg", v.id),
+                            "m3u8": format!("/stream/{}/playlist.m3u8", v.id),
+                        })
+                    })
+                    .collect();
+                json_response(StatusCode::OK, json!(json_videos))
+            }
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// Serve a file from the data dir (hls or thumbnail) by relative name, or 404.
+/// Read a file under `data_dir/{prefix}/{path}`, serving it with the right
+/// content type. `prefix` is `hls` for streams and `thumbnails` for
+/// thumbnails.
+async fn read_data_file(state: &AppState, prefix: &str, path: String) -> Response {
+    // Lock only for the duration of reading data_dir; the guard must be dead
+    // before the await so the future stays Send.
+    let data_dir = {
+        let cfg = state.config.lock().unwrap();
+        match &*cfg {
+            Some(c) => PathBuf::from(&c.data_dir),
+            None => return json_response(StatusCode::NOT_FOUND, json!({"error": "not configured"})),
+        }
+    };
+    // Sanitize: strip leading slash, reject traversal.
+    let safe = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|p| !p.starts_with("..") && !p.contains('\0'))
+        .collect::<Vec<_>>()
+        .join("/");
+    let full = data_dir.join(prefix).join(&safe);
+    let bytes = match tokio::fs::read(&full).await {
+        Ok(b) => b,
+        Err(_) => return plain(StatusCode::NOT_FOUND, "not found"),
+    };
+    let ext = full
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    let content_type = match ext.as_str() {
+        "m3u8" => "application/vnd.apple.mpegurl",
+        "ts" => "application/octet-stream",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        _ => "application/octet-stream",
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, content_type)
+        .body(Body::from(bytes))
+        .expect("build response")
+}
+
+/// Serve HLS segments/playlists from `data_dir/hls/`.
+async fn stream_file(State(state): State<AppState>, PathExtract(path): PathExtract<String>) -> Response {
+    read_data_file(&state, "hls", path).await
+}
+
+/// Serve thumbnails from `data_dir/thumbnails/`.
+async fn thumbnail_file(State(state): State<AppState>, PathExtract(path): PathExtract<String>) -> Response {
+    read_data_file(&state, "thumbnails", path).await
+}
+
 /// Boot the web server.
 pub async fn run() -> anyhow::Result<()> {
     let port = std::env::var("HOME_VIDEO_PORT")
@@ -342,7 +445,57 @@ pub async fn run() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(CONFIG_PATH_DEFAULT));
 
     let existing_config = config::load(&config_path)?;
-    let state = AppState::new(config_path, existing_config, port);
+    // Build the db (from the config's data dir) and the state together, so
+    // `existing_config` is not moved into the match and then reused.
+    let (db, existing_config) = match existing_config {
+        Some(cfg) => {
+            if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
+                return Err(anyhow::anyhow!("create data_dir {:?}: {e}", cfg.data_dir));
+            }
+            let db_path = PathBuf::from(&cfg.data_dir).join("home-video.db");
+            let db = match Db::new(&db_path).and_then(|db| db.create_schema().map(|_| db)) {
+                Ok(db) => db,
+                Err(e) => return Err(anyhow::anyhow!("create db: {e}")),
+            };
+            (Some(db), Some(cfg))
+        }
+        None => (None, None),
+    };
+    let state = AppState::new(config_path, existing_config, port, db);
+
+    // Background watcher: initial scan + loop every scan_interval_s.
+    let watcher_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            // Wait until configured. Lock only to read the config; the guard
+            // must be dead before any await so the spawned future stays Send.
+            let scan_interval = {
+                let configured = watcher_state.config.lock().unwrap();
+                match &*configured {
+                    Some(c) => Some(c.scan_interval_s),
+                    None => None,
+                }
+            };
+            match scan_interval {
+                Some(interval) => {
+                    if let Err(e) = ingest::scan(&watcher_state).await {
+                        eprintln!("scan error: {e}");
+                    }
+                    let mut interval = tokio::time::interval(Duration::from_secs(interval));
+                    loop {
+                        interval.tick().await;
+                        if let Err(e) = ingest::scan(&watcher_state).await {
+                            eprintln!("scan error: {e}");
+                        }
+                    }
+                }
+                None => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+        }
+    });
 
     let app = Router::new()
         .route("/", get(index))
@@ -351,6 +504,9 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/admin/login", post(login))
         .route("/admin/logout", post(logout))
         .route("/api/session", get(session))
+        .route("/api/videos", get(list_videos))
+        .route("/stream/*path", get(stream_file))
+        .route("/thumbnail/*path", get(thumbnail_file))
         .route("/health", get(|| async { "ok".to_string() }))
         .route("/*path", get(static_handler))
         .with_state(state.clone())

@@ -19,24 +19,51 @@
   <main id="main">
     <section id="tab-library" class="tab active">
       <h2>Library</h2>
-      <p class="placeholder">Videos appear here once imported.</p>
+      <div class="controls">
+        <input type="text" id="search-input" placeholder="Search title / tags / description...">
+        <select id="filter-resolution"><option value="">All resolutions</option></select>
+        <select id="filter-codec"><option value="">All codecs</option></select>
+      </div>
+      <div id="video-grid" class="grid"></div>
+      <p class="placeholder" id="grid-placeholder">Videos appear here once imported.</p>
     </section>
     <section id="tab-video" class="tab">
-      <h2>Video</h2>
-      <p class="placeholder">Select a video to play.</p>
+      <h2 id="video-title">Video</h2>
+      <p class="placeholder" id="video-placeholder">Select a video to play.</p>
+      <video id="video-player" controls playsinline style="display:none; width:100%; max-width:960px;"></video>
+      <div id="video-meta" class="meta" style="display:none;"></div>
+      <div id="video-edit" style="display:none;">
+        <label>Description
+          <textarea id="edit-description" rows="3" style="width:100%;"></textarea>
+        </label>
+        <label>Tags
+          <input type="text" id="edit-tags" style="width:100%;"></label>
+        <button id="save-video">Save</button>
+      </div>
     </section>
     <section id="tab-playlist" class="tab">
-      <h2>Playlist</h2>
-      <p class="placeholder">Playlists appear here.</p>
+      <h2>Playlists</h2>
+      <div id="playlist-list" class="list"></div>
+      <div id="playlist-detail" class="detail"></div>
     </section>
     <section id="tab-admin" class="tab">
       <h2>Admin</h2>
-      <p class="placeholder">Admin controls appear here.</p>
+      <div id="version-banner" class="banner"></div>
+      <h3>Import YouTube</h3>
+      <div id="yt-import">
+        <input type="text" id="yt-url" placeholder="YouTube URL or playlist">
+        <button id="yt-import-btn">Import</button>
+      </div>
+      <h3>Videos</h3>
+      <div id="admin-videos" class="list"></div>
+      <h3>Settings</h3>
+      <div id="admin-settings"></div>
     </section>
   </main>
   <footer>
     <span id="status">status: <span id="health">checking&hellip;</span></span>
   </footer>
   <script src="/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.12/dist/hls.min.js" defer></script>
 </body>
 </html>

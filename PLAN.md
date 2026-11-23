@@ -13,6 +13,13 @@ Each slice maps to one or more issues in the issue tracker (see
   and the admin page is reachable (other routes 403 until complete). Verified
   end-to-end: `/setup` POST, `/admin/login` sets HttpOnly cookie, `/api/session`
   true→false after logout, wrong password rejected.
+- **S2** (Phase 2): local auto-import. Drop a video into a watch dir → it
+  appears in Library within ~30 s with thumbnail, metadata, and a working HLS
+  stream. Verified end-to-end: startup scan + 30 s loop, fingerprint dedupe
+  (size + mtime + first-1 MB hash), ffprobe metadata (duration/resolution/
+  codec/size/bitrate), thumbnail (ffmpeg), copy-stream HLS segmentation
+  (`hls/{id}/playlist.m3u8` + `.ts` segments), SQLite index; `/stream/*path`
+  and `/thumbnail/*path` serve the assets; dedupe prevents re-import.
 
 ## Phase 0 — Repo & tooling setup
 
