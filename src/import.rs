@@ -131,6 +131,43 @@ pub async fn import(state: &AppState, url: &str) -> Result<ImportResult> {
         None
     };
 
+    // Per-video title(s) from the metadata, so imported videos are labelled
+    // by their real YouTube title rather than the file stem (video id).
+    // Single video: one title. Playlist: a map of video id -> title (files are
+    // named {id}.{ext}, so we match on the id).
+    let video_title: Option<String> = if !is_playlist {
+        metadata
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    let playlist_video_titles: Vec<(String, String)> = if is_playlist {
+        if let Some(arr) = metadata.as_array() {
+            arr
+                .iter()
+                .filter_map(|v| {
+                    let id = v
+                        .get("id")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())?
+                    ;
+                    let title = v
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    Some((id, title))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     // A per-import subdirectory (timestamped) so downloaded files are easy to
     // find and don't collide across imports.
     let ts = std::time::SystemTime::now()
@@ -150,7 +187,20 @@ pub async fn import(state: &AppState, url: &str) -> Result<ImportResult> {
     let mut ingested = 0;
     let mut imported_ids: Vec<u64> = Vec::new();
     for f in &files {
-        match ingest(state, f).await {
+        let file_id = f
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let title = if is_playlist {
+            playlist_video_titles
+                .iter()
+                .find(|(id, _)| *id == file_id)
+                .map(|(_, t)| t.as_str())
+        } else {
+            video_title.as_deref()
+        };
+        match ingest(state, f, title).await {
             Ok(Some(id)) => {
                 ingested += 1;
                 imported_ids.push(id);

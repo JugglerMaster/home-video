@@ -352,8 +352,19 @@ pub fn hls(src: &Path, out_dir: &Path, codec: &str, settings: &ConvertSettings) 
 }
 
 /// Ingest a single video file into the app.
-pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
+pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Result<Option<u64>> {
     let fp = fingerprint(path)?;
+
+    // Prefer an explicit title (e.g. from yt-dlp metadata); fall back to the
+    // file stem (used by the scan pipeline and local files).
+    let title = title
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        });
 
     // Dedupe.
     {
@@ -389,11 +400,7 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
                     id: 0,
                     fingerprint: fp.clone(),
                     path: path.display().to_string(),
-                    title: path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
+                    title: title.clone(),
                     description: String::new(),
                     tags: String::new(),
                     duration: probe.duration,
@@ -433,11 +440,7 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
     let queue_entry: Option<ConversionItem> = if convert.should_convert(codec.as_str()) {
         let entry = ConversionItem {
             video_id,
-            title: path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
+            title: title.clone(),
             started_at: now.clone(),
         };
         { let mut q = state.conversions.lock().unwrap(); q.push(entry.clone()); }
@@ -497,7 +500,7 @@ pub async fn scan(state: &AppState) -> Result<usize> {
     let files = scan_video_files(&dirs);
     let mut ingested = 0;
     for f in files {
-        match ingest(state, &f).await {
+        match ingest(state, &f, None).await {
             Ok(Some(_)) => ingested += 1,
             Ok(None) => {}
             Err(e) => eprintln!("scan ingest error for {:?}: {e}", f),

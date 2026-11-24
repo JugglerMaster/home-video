@@ -280,7 +280,7 @@ async fn full_ingest_pipeline_creates_video_and_artifacts() {
     let state = make_state(data_dir.clone(), db);
     let src = make_video(&dir, "src.mp4");
 
-    let id = ingest::ingest(&state, &src)
+    let id = ingest::ingest(&state, &src, None)
         .await
         .expect("ingest")
         .expect("should ingest (new fingerprint)");
@@ -323,14 +323,14 @@ async fn full_ingest_dedupe_skips_existing_fingerprint() {
     let state = make_state(data_dir.clone(), db);
     let src = make_video(&dir, "src.mp4");
 
-    let id1 = ingest::ingest(&state, &src)
+    let id1 = ingest::ingest(&state, &src, None)
         .await
         .expect("first ingest")
         .expect("should ingest");
     assert!(id1 > 0);
 
     // Same file again → same fingerprint → dedupe (None).
-    let id2 = ingest::ingest(&state, &src).await.expect("second ingest");
+    let id2 = ingest::ingest(&state, &src, None).await.expect("second ingest");
     assert!(id2.is_none(), "second ingest should be deduped (None)");
 
     // Only one video in DB.

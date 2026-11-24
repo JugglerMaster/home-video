@@ -308,8 +308,9 @@ async fn login(
     state.sessions.lock().unwrap().insert(token.clone());
     Response::builder()
         .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json; charset=utf-8")
         .header("Set-Cookie", format!("session={token}; Path=/; HttpOnly; Max-Age=86400"))
-        .body(Body::from(Bytes::from_static(b"")))
+        .body(Body::from(Bytes::from(serde_json::to_vec(&json!({"ok": true})).unwrap())))
         .expect("build response")
 }
 
