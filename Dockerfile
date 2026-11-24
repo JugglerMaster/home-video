@@ -16,13 +16,17 @@ FROM debian:bookworm-slim
 
 # ffmpeg provides both `ffmpeg` and `ffprobe`; yt-dlp powers YouTube import;
 # ca-certificates for the version-check HTTPS call; curl for the healthcheck.
+# The apt yt-dlp package is too old for YouTube's current API, so install the
+# latest standalone binary (recommended install method) instead.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
-        yt-dlp \
         ca-certificates \
         curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+        -o /usr/local/bin/yt-dlp \
+    && chmod +x /usr/local/bin/yt-dlp
 
 WORKDIR /app
 COPY --from=builder /build/target/release/home-video ./home-video
