@@ -220,12 +220,12 @@ impl Db {
         Ok(out)
     }
 
-    /// Update a video's description and tags (and `updated_at`).
-    pub fn update_video(&self, id: u64, description: &str, tags: &str) -> anyhow::Result<()> {
+    /// Update a video's title, description, and tags (and `updated_at`).
+    pub fn update_video(&self, id: u64, title: &str, description: &str, tags: &str) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(
-            "UPDATE videos SET description = ?1, tags = ?2, updated_at = ?3 WHERE id = ?4",
+            "UPDATE videos SET title = ?1, description = ?2, tags = ?3, updated_at = ?4 WHERE id = ?5",
         )?;
-        stmt.execute(params![description, tags, now(), id])?;
+        stmt.execute(params![title, description, tags, now(), id])?;
         Ok(())
     }
 
@@ -241,6 +241,36 @@ impl Db {
         let mut stmt = self.conn.prepare("DELETE FROM videos WHERE id = ?1")?;
         let n: usize = stmt.execute(params![id])?;
         Ok(n as u64)
+    }
+
+    /// Get a video by id. Returns `None` if the video does not exist.
+    pub fn get_video_by_id(&self, id: u64) -> anyhow::Result<Option<Video>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, fingerprint, path, title, description, tags, duration, resolution, codec, size, bitrate, created_at, updated_at, hls_m3u8, thumbnail_path FROM videos WHERE id = ?1",
+        )?;
+        match stmt.query_row(params![id], |row| {
+            Ok(Video {
+                id: row.get(0)?,
+                fingerprint: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                description: row.get(4)?,
+                tags: row.get(5)?,
+                duration: row.get(6)?,
+                resolution: row.get(7)?,
+                codec: row.get(8)?,
+                size: row.get(9)?,
+                bitrate: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+                hls_m3u8: row.get(13)?,
+                thumbnail_path: row.get(14)?,
+            })
+        }) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("get_video_by_id: {e}")),
+        }
     }
 
     /// Find a video by fingerprint (dedupe check). Returns `None` if the

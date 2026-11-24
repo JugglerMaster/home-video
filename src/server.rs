@@ -423,6 +423,7 @@ struct VideoQuery {
 /// Request body for `POST /api/videos/:id`.
 #[derive(Deserialize)]
 struct UpdateVideoRequest {
+    pub title: String,
     pub description: String,
     pub tags: String,
 }
@@ -450,7 +451,7 @@ async fn update_video(
     };
     let db_guard = state.db.lock().unwrap();
     match db_guard.as_ref() {
-        Some(db) => match db.update_video(id, &body.description, &body.tags) {
+        Some(db) => match db.update_video(id, &body.title, &body.description, &body.tags) {
             Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
             Err(e) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -485,23 +486,44 @@ async fn delete_video(
     };
     let db_guard = state.db.lock().unwrap();
     match db_guard.as_ref() {
-        Some(db) => match db.delete_video(id) {
-            Ok(n) => {
-                // Best-effort artifact cleanup.
-                let hls_dir = data_dir.join("hls").join(format!("{id}"));
-                let _ = std::fs::remove_dir_all(&hls_dir);
-                let thumb = data_dir.join("thumbnails").join(format!("{id}.jpg"));
-                let _ = std::fs::remove_file(&thumb);
-                json_response(
-                    StatusCode::OK,
-                    json!({"ok": true, "removed": n}),
-                )
+        Some(db) => {
+            // Fetch the source path before deleting the row so we can remove
+            // the file (prevents the scan from re-ingesting it).
+            let source_path = match db.get_video_by_id(id) {
+                Ok(Some(v)) => v.path,
+                Ok(None) => {
+                    return json_response(
+                        StatusCode::NOT_FOUND,
+                        json!({"error": "video not found"}),
+                    );
+                }
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": e.to_string()}),
+                    );
+                }
+            };
+            match db.delete_video(id) {
+                Ok(n) => {
+                    // Best-effort artifact cleanup.
+                    let hls_dir = data_dir.join("hls").join(format!("{id}"));
+                    let _ = std::fs::remove_dir_all(&hls_dir);
+                    let thumb = data_dir.join("thumbnails").join(format!("{id}.jpg"));
+                    let _ = std::fs::remove_file(&thumb);
+                    // Remove the source file so the scan won't re-add it.
+                    let _ = std::fs::remove_file(&source_path);
+                    json_response(
+                        StatusCode::OK,
+                        json!({"ok": true, "removed": n}),
+                    )
+                }
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error": e.to_string()}),
+                ),
             }
-            Err(e) => json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error": e.to_string()}),
-            ),
-        },
+        }
         None => json_response(
             StatusCode::FORBIDDEN,
             json!({"error": "not configured"}),

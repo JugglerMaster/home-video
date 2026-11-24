@@ -43,13 +43,20 @@
             </div>
             <h2 id="video-title">Video</h2>
             <p class="placeholder" id="video-placeholder">Select a video to play.</p>
-            <div id="video-wrap">
-                <video id="video-player" controls playsinline style="display:none;"></video>
+            <div id="video-wrap" class="video-wrap">
+                <video id="video-player" controls playsinline style="display:none;">
+                </video>
+                <div id="video-controls" class="video-controls">
+                    <button id="fit-btn" class="small-btn" type="button" title="Fit to screen">Fit</button>
+                    <button id="fill-btn" class="small-btn" type="button" title="Fill screen">Fill</button>
+                </div>
             </div>
-            <button id="video-fullscreen-btn" class="back-btn" type="button" data-fullscreen="video-wrap">Fullscreen</button>
             <div id="video-meta" class="meta" style="display:none;"></div>
             <div id="video-edit" style="display:none;">
                 <h3>Edit video</h3>
+                <label>Title
+                    <input id="video-title-input" type="text" placeholder="Title">
+                </label>
                 <label>Description
                     <input id="video-desc" type="text" placeholder="Description">
                 </label>
@@ -119,10 +126,6 @@
                         </label>
                         <button id="import-btn" type="button">Import</button>
                         <p class="error" id="import-error"></p>
-                    </div>
-                    <div class="col">
-                        <h3>Videos</h3>
-                        <div id="admin-videos" class="list"></div>
                     </div>
                 </div>
                 <h3>Settings</h3>

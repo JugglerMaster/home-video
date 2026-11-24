@@ -255,19 +255,34 @@ function loadVideo(id) {
     meta.style.display = "block";
     edit.style.display = "block";
     renderVideoMeta(meta, v);
+    document.getElementById("video-title-input").value = v.title;
     document.getElementById("video-desc").value = v.description || "";
     document.getElementById("video-tags").value = v.tags || "";
+    // Clicking the title near the top begins editing it (#15).
+    document.getElementById("video-title").onclick = function () {
+        document.getElementById("video-title-input").focus();
+        document.getElementById("video-edit").scrollIntoView({ block: "nearest" });
+    };
     document.getElementById("save-video-btn").onclick = function () {
         fetch("/api/videos/" + v.id, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+                title: document.getElementById("video-title-input").value,
                 description: document.getElementById("video-desc").value,
                 tags: document.getElementById("video-tags").value,
             })
         }).then(() => {
             activate("library");
         });
+    };
+    // Fit/fill modes (#12).
+    player.classList.remove("video-fill");
+    document.getElementById("fit-btn").onclick = function () {
+        player.classList.remove("video-fill");
+    };
+    document.getElementById("fill-btn").onclick = function () {
+        player.classList.add("video-fill");
     };
     document.getElementById("delete-video-btn").onclick = function () {
         if (!session.authenticated) return;
@@ -426,21 +441,6 @@ function renderAdmin() {
 }
 
 function renderAdminDashboard() {
-    fetchJson("/api/videos").then(function (videos) {
-        const el = document.getElementById("admin-videos");
-        el.innerHTML = videos.map(function (v) {
-            return "<div class='admin-video'>" +
-                "<span class='admin-video-title'>" + esc(v.title) + "</span>" +
-                "<button class='small-btn' data-del='" + v.id + "'>Delete</button>" +
-            "</div>";
-        }).join("");
-        el.querySelectorAll("[data-del]").forEach(function (btn) {
-            btn.addEventListener("click", function () {
-                const id = parseInt(btn.dataset.del);
-                fetch("/api/videos/" + id, { method: "DELETE" }).then(function () { renderAdmin(); });
-            });
-        });
-    });
     loadSettings();
     fetch("/api/version").then(function (r) {
         r.json().then(function (j) {

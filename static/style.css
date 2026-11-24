@@ -144,7 +144,11 @@ h3 { margin-top: 1.5rem; }
     margin-top: 0.4rem;
 }
 .back-btn:hover { border-color: var(--accent); color: var(--fg); }
-#video-wrap { width: 100%; margin: 0.5rem 0; }
+#video-wrap { width: 100%; margin: 0.5rem 0; position: relative; }
+.video-controls { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; background: rgba(0,0,0,0.6); padding: 6px 10px; border-radius: 8px; }
+.video-controls .small-btn { background: rgba(255,255,255,0.15); color: #fff; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+.video-controls .small-btn:hover { background: rgba(255,255,255,0.3); }
+.video-fill { object-fit: cover; }
 #video-player {
     display: block;
     width: 100%;
