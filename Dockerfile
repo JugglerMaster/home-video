@@ -23,6 +23,7 @@ RUN apt-get update \
         ffmpeg \
         ca-certificates \
         curl \
+        python3 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
         -o /usr/local/bin/yt-dlp \
