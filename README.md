@@ -1,7 +1,7 @@
 # home-video
 
 A home video library: a web server that collects, indexes, and streams videos
-from local folders and YouTube, running as a single Docker container on NASOMV.
+from local folders and YouTube, running as a single Docker container.
 
 See [SPEC.md](SPEC.md) for the full specification and
 [PLAN.md](PLAN.md) for the phased build plan.
