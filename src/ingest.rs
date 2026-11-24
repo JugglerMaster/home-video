@@ -40,7 +40,7 @@ fn now() -> String {
     let t = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap();
-    format!("{}.{}", t.as_secs(), t.subsec_nanos() / 1_000_000)
+    format!("{}.{}", t.as_secs(), t.subsec_millis())
 }
 
 /// Recursive video file scan under `dirs`.
@@ -156,13 +156,18 @@ pub fn probe(path: &Path) -> Result<Probe> {
 }
 
 /// Generate a thumbnail (ffmpeg, 10s in, 480p wide).
-pub fn thumbnail(src: &Path, out: &Path) -> Result<()> {
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent)?;
+///
+/// Tries a frame at 10s first; falls back to 0s if the video is shorter than
+/// 10s. ffmpeg exits 0 even when it produces no frame (e.g. seeking past the
+/// end), so each attempt is verified by checking the output file actually
+/// exists and is non-empty rather than trusting the exit code.
+fn thumbnail_attempt(src: &Path, ss: &str, out: &Path) -> Result<bool> {
+    if out.exists() && fs::remove_file(out).is_err() {
+        return Ok(false);
     }
     let output = std::process::Command::new("ffmpeg")
         .args([
-            "-y", "-ss", "00:00:10",
+            "-y", "-ss", ss,
             "-i", src.to_str().unwrap_or_default(),
             "-frames:v", "1",
             "-vf", "scale=480:-2",
@@ -170,28 +175,38 @@ pub fn thumbnail(src: &Path, out: &Path) -> Result<()> {
             out.to_str().unwrap_or_default(),
         ])
         .output()
-        .context("ffmpeg thumbnail")?;
+        .context("ffmpeg thumbnail")?
+        ;
     if !output.status.success() {
-        // Thumbnail is best-effort; fall back to 0s if 10s fails.
-        let output2 = std::process::Command::new("ffmpeg")
-            .args([
-                "-y", "-ss", "0",
-                "-i", src.to_str().unwrap_or_default(),
-                "-frames:v", "1",
-                "-vf", "scale=480:-2",
-                "-q:v", "5",
-                out.to_str().unwrap_or_default(),
-            ])
-            .output()
-            .context("ffmpeg thumbnail (retry)")?;
-        if !output2.status.success() {
-            return Err(anyhow::anyhow!(
-                "thumbnail failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
+        return Ok(false);
     }
-    Ok(())
+    let ok = out.exists()
+        && out
+            .metadata()
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+    if !ok {
+        eprintln!(
+            "thumbnail attempt (ss={ss}) produced no file: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(ok)
+}
+
+pub fn thumbnail(src: &Path, out: &Path) -> Result<()> {
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // Try 10s in first; fall back to 0s for short videos. A spawn failure
+    // (e.g. missing ffmpeg) propagates as an error rather than panicking.
+    if thumbnail_attempt(src, "00:00:10", out)? {
+        return Ok(());
+    }
+    if thumbnail_attempt(src, "0", out)? {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!("thumbnail failed for {}", src.display()))
 }
 
 /// Segment to HLS (copy-stream, no re-encode). Writes playlist.m3u8 + seg_*.ts

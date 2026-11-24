@@ -196,6 +196,23 @@
     }).catch(function () { playlistListEl.innerHTML = ""; playlistDetailEl.innerHTML = ""; });
   }
 
+  // New playlist button (S5).
+  var newPlaylistBtn = document.getElementById("new-playlist-btn");
+  if (newPlaylistBtn) {
+    newPlaylistBtn.addEventListener("click", function () {
+      var name = document.getElementById("new-playlist-name").value.trim();
+      if (!name) return;
+      fetch("/api/playlists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name })
+      }).then(function (r) {
+        if (r.ok) { loadPlaylists(); }
+        else { return r.json().then(function (e) { alert("Failed: " + e.error); }); }
+      }).catch(function () { alert("Failed"); });
+    });
+  }
+
   function loadPlaylistDetail(id) {
     fetch("/api/playlists/" + id).then(function (r) {
       if (!r.ok) { playlistDetailEl.innerHTML = ""; return; }
@@ -214,17 +231,50 @@
       playlistDetailEl.querySelectorAll(".remove-item").forEach(function (btn) {
         btn.addEventListener("click", function () {
           fetch("/api/playlists/" + id + "/items", {
-            method: "POST",
+            method: "DELETE",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ video_id: parseInt(btn.dataset.id), action: "remove" })
+            body: JSON.stringify({ video_id: parseInt(btn.dataset.id) })
           }).then(loadPlaylistDetail).catch(function () { loadPlaylistDetail(id); });
         });
       });
       var addBtn = document.getElementById("add-playlist-btn");
       if (addBtn) {
         addBtn.addEventListener("click", function () {
-          // Placeholder: full add-by-search lands with S5 backend.
-          loadPlaylistDetail(id);
+          var title = document.getElementById("add-playlist-title").value.trim();
+          if (!title) return;
+          fetch("/api/videos?search=" + encodeURIComponent(title)).then(function (r) {
+            if (!r.ok) { alert("Search failed"); return; }
+            return r.json();
+          }).then(function (results) {
+            if (results.length === 0) {
+              alert("No videos found");
+              return;
+            }
+            if (results.length === 1) {
+              var v = results[0];
+              fetch("/api/playlists/" + id + "/items", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ video_id: v.id })
+              }).then(function () { loadPlaylistDetail(id); }).catch(function () { loadPlaylistDetail(id); });
+            } else {
+              // Show a dropdown of matches
+              var opts = results.map(function (v) {
+                return '<option value="' + v.id + '">' + esc(v.title) + ' (' + v.id + ')</option>';
+              }).join("");
+              var sel = document.createElement("select");
+              sel.innerHTML = opts;
+              sel.addEventListener("change", function () {
+                var vid = parseInt(sel.value);
+                fetch("/api/playlists/" + id + "/items", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ video_id: vid })
+                }).then(function () { loadPlaylistDetail(id); }).catch(function () { loadPlaylistDetail(id); });
+              });
+              playlistDetailEl.appendChild(sel);
+            }
+          }).catch(function () { alert("Search failed"); });
         });
       }
     }).catch(function () { playlistDetailEl.innerHTML = ""; });
@@ -255,6 +305,7 @@
       });
     }).catch(function () { adminVideosEl.innerHTML = ""; });
     checkVersion();
+    renderSettings();
   }
 
   function checkVersion() {
@@ -274,6 +325,50 @@
     }).catch(function () { versionBanner.style.display = "none"; });
   }
   setInterval(checkVersion, 60000);
+
+  // Settings (S6).
+  var settingsEl = document.getElementById("admin-settings");
+  function renderSettings() {
+    if (!settingsEl) return;
+    fetch("/api/settings").then(function (r) {
+      if (!r.ok) { settingsEl.innerHTML = "<p>Not configured</p>"; return; }
+      return r.json();
+    }).then(function (s) {
+      settingsEl.innerHTML =
+        '<form id="settings-form">' +
+        '<div><label>Watch dirs (comma-separated)</label>' +
+        '<input type="text" id="settings-watch" value="' + esc(s.watch_dirs.join(", ")) + '"></div>' +
+        '<div><label>Data dir</label>' +
+        '<input type="text" id="settings-data" value="' + esc(s.data_dir) + '"></div>' +
+        '<div><label>Scan interval (s)</label>' +
+        '<input type="number" id="settings-interval" value="' + s.scan_interval_s + '"></div>' +
+        '<div><label><input type="checkbox" id="settings-anonymous" ' + (s.anonymous_view ? "checked" : "") + '> Anonymous view</label></div>' +
+        '<button type="submit" id="settings-save">Save</button>' +
+        '</form>';
+      var form = settingsEl.querySelector("#settings-form");
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        var watchDirs = document.getElementById("settings-watch").value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+        fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            watch_dirs: watchDirs,
+            data_dir: document.getElementById("settings-data").value,
+            scan_interval_s: parseInt(document.getElementById("settings-interval").value, 10) || 30,
+            anonymous_view: document.getElementById("settings-anonymous").checked
+          })
+        }).then(function (r) {
+          if (r.ok) {
+            alert("Settings saved");
+          } else {
+            return r.json().then(function (e) { alert("Save failed: " + e.error); });
+          }
+        }).catch(function () { alert("Save failed"); });
+      });
+    }).catch(function () { settingsEl.innerHTML = "<p>Not configured</p>"; });
+  }
+  renderSettings();
 
   // YouTube import (S3).
   var ytBtn = document.getElementById("yt-import-btn");

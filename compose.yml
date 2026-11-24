@@ -1,0 +1,25 @@
+services:
+  home-video:
+    build: .
+    container_name: home-video
+    restart: unless-stopped
+    ports:
+      # Override with HOST_PORT=XXXX for local testing (8080 is the NAS default).
+      - "${HOST_PORT:-8080}:8080"
+    volumes:
+      # Source videos — mounted read-only; the app never writes to watch dirs.
+      - ./watch:/media/videos:ro
+      # Generated data: home-video.db, thumbnails/, hls/, youtube/.
+      - ./data:/data
+      # Config dir (a directory, not a file, to avoid Docker's single-file
+      # volume pitfall). The app writes config.json here on first setup.
+      - ./config:/config
+    environment:
+      - HOME_VIDEO_PORT=8080
+      - HOME_VIDEO_CONFIG=/config/config.json
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

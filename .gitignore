@@ -13,3 +13,7 @@ config.json
 
 # Scratch (local-markdown issue tracker, if ever used)
 .scratch/
+
+# Local test / runtime data (mounted by compose.yml; never commit)
+data/
+watch/

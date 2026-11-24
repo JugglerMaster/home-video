@@ -1,0 +1,15 @@
+target
+.git
+.gitignore
+data
+watch
+config
+README.md
+SPEC.md
+PLAN.md
+docs
+*.md
+.dockerignore
+Dockerfile
+compose.yml
+config.json
