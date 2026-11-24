@@ -26,8 +26,46 @@ Each slice maps to one or more issues in the issue tracker (see
   playlist), download to `youtube_download_dir`, ingest via the Phase 2
   pipeline (dedupe, ffprobe, thumbnail, HLS), playlist auto-create
   (`source="youtube"`, `youtube_url` set, items in order), `/api/import`
-  endpoint (admin-auth), `/api/playlists` and `/api/playlists/{id}`
+  endpoint (admin-auth), `/api/playlists` and `/api/playlists/:id`
   endpoints.
+- **S4** (Phase 4): video detail page (HLS player, metadata, description/tag
+  editing) and FTS5-backed search in the Library. Verified end-to-end in the
+  container: detail page + HLS player, `POST /api/videos/:id` edit (fixed axum
+  0.7 `:id` route params — previously fell through to `/*path` → 405), FTS5
+  search in Library. Regression tests cover the 405 header, POST dispatch, and
+  playlist `:id` routes.
+- **S5** (Phase 5): playlist create/rename/add/remove endpoints and Playlist
+  tab UI (`/api/playlists`, `/api/playlists/:id`,
+  `/api/playlists/:id/items`). Verified end-to-end in the container: create
+  (201), rename (`PUT`, 200), add item (`POST`, 200), remove item (`DELETE`,
+  200), delete playlist (`DELETE`, 200), playlist detail with item list.
+- **S6** (Phase 6): video delete (DB + generated artifacts), settings GET/POST,
+  and admin operations. Verified end-to-end in the container: delete video
+  (DB row + HLS/thumbnail artifacts removed), settings GET (current config),
+  settings POST (re-edit watch dirs / scan interval / anonymous toggle), admin
+  page reachable.
+- **S7** (Phase 7): GitHub Releases version check and the "update available"
+  banner. Verified end-to-end in the container: `/api/version` returns current
+  vs latest + update flag; UI banner (`#version-banner`) wired to the endpoint
+  and shows current → latest when an update is available.
+- **S8** (Phase 8): Docker/NASOMV deploy. Multi-stage `Dockerfile` (rust build
+  → slim runtime w/ ffmpeg + yt-dlp), `compose.yml` (watch ro, data rw, config
+  rw, port 8080), `.dockerignore`. Verified end-to-end in the container: `docker
+  compose up` → setup wizard → import local video (thumbnail + HLS) → play →
+  playlist → delete → version banner. NASOMV hardware check pending (port 8080).
+
+- **S9** (Phase 9): integration test suite + docs pass. Verified: `tests/integration.rs`
+  covers ingest fingerprint (deterministic; differs by content/size/mtime), HLS
+  copy-stream (playlist + `.ts` segments), thumbnail (JPEG), auth (argon2
+  hash/verify + malformed rejection), and the full ingest pipeline (DB row +
+  HLS/thumbnail artifacts + dedupe). `cargo clippy --all-targets -- -D
+  warnings` clean. README rewritten (overview, stack, quick start local +
+  Docker, setup wizard, config reference, API routes, build/test/lint, deploy).
+
+## Remaining for the overall definition of done
+
+The NASOMV hardware check for S8 (port 8080, real hardware). Everything else
+in the definition of done is met.
 
 ## Phase 0 — Repo & tooling setup
 
