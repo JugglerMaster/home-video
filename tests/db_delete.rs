@@ -31,6 +31,8 @@ fn sample_video(title: &str, fp: &str) -> Video {
         updated_at: "0".to_string(),
         hls_m3u8: String::new(),
         thumbnail_path: String::new(),
+        playback_position: 0.0,
+        favorite: false,
     }
 }
 
@@ -44,7 +46,7 @@ async fn delete_video_updates_fts() {
     // "no such column: deleted.id"
     let n = db.delete_video(id).expect("delete_video should succeed");
     assert_eq!(n, 1);
-    assert!(db.get_videos().unwrap().is_empty());
+    assert!(db.get_videos_sorted("date", "desc").unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -59,5 +61,5 @@ async fn delete_video_updates_fts_searchable() {
     db.delete_video(id1).unwrap();
     assert_eq!(db.search_videos("Alpha").unwrap().len(), 0);
     assert_eq!(db.search_videos("Beta").unwrap().len(), 1);
-    assert_eq!(db.get_videos().unwrap().len(), 1);
+    assert_eq!(db.get_videos_sorted("date", "desc").unwrap().len(), 1);
 }

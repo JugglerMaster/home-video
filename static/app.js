@@ -8,6 +8,9 @@ let hls = null;
 let session = { authenticated: false };
 let settings = null;
 let selectedIds = new Set();
+let sortState = { by: "date", order: "desc" };
+let favFilter = false;
+let queue = [];
 
 // Elements
 const links = document.querySelectorAll(".tab-link");
@@ -144,10 +147,12 @@ function renderLibraryCards() {
     const cards = filteredVideos.map(function (v) {
         const badge = v.m3u8 ? "" : "<div class='card-badge'>Not playable</div>";
         const checked = selectedIds.has(v.id) ? "checked" : "";
+        const fav = v.favorite ? "active" : "";
         return "<div class='card' data-id='" + v.id + "'>" +
             "<label class='card-checkbox-label'>" +
                 "<input type='checkbox' class='card-checkbox' value='" + v.id + "'>" + checked +
             "</label>" +
+            "<span class='fav-star' data-fav='" + v.id + "'>" + (v.favorite ? "\u2605" : "\u2606") + "</span>" +
             "<img src='" + (v.thumbnail || "/static/thumbnail/default.jpg") + "' alt='' loading='lazy'>" +
             badge +
             "<div class='card-title'>" + esc(v.title) + "</div>" +
@@ -157,8 +162,8 @@ function renderLibraryCards() {
     el.innerHTML = cards;
     el.querySelectorAll(".card").forEach(function (card) {
         card.addEventListener("click", function (e) {
-            // Don't trigger navigation when the checkbox is clicked.
-            if (e.target.classList.contains("card-checkbox")) return;
+            // Don't trigger navigation when the checkbox or favorite star is clicked.
+            if (e.target.classList.contains("card-checkbox") || e.target.classList.contains("fav-star")) return;
             loadVideo(parseInt(card.dataset.id));
         });
     });
@@ -170,29 +175,86 @@ function renderLibraryCards() {
             updateSelectedCount();
         });
     });
+    el.querySelectorAll(".fav-star").forEach(function (star) {
+        star.addEventListener("click", function (e) {
+            e.stopPropagation();
+            const id = parseInt(star.dataset.fav);
+            toggleFavorite(id);
+        });
+    });
     updateSelectedCount();
+}
+
+function toggleFavorite(id) {
+    fetch("/api/videos/" + id + "/favorite", { method: "POST" }).then(function () {
+        // Re-render to update the star and filters.
+        applyFilters();
+    }).catch(function () {});
 }
 
 function applyFilters() {
     const q = document.getElementById("search-input").value.toLowerCase();
     const codec = document.getElementById("codec-filter").value.toLowerCase();
+    const favOnly = document.getElementById("fav-filter").checked;
     filteredVideos = videos.filter((v) =>
         (v.title.toLowerCase().includes(q) ||
          v.description.toLowerCase().includes(q) ||
          v.tags.toLowerCase().includes(q)) &&
-        (codec === "" || v.codec.toLowerCase().includes(codec))
+        (codec === "" || v.codec.toLowerCase().includes(codec)) &&
+        (!favOnly || v.favorite)
     );
     renderLibraryCards();
 }
 
 function renderLibrary() {
     updateSyncStatus("Syncing\u2026");
-    fetchJson("/api/videos").then((data) => {
+    const qs = new URLSearchParams({ sort: sortState.by, order: sortState.order }).toString();
+    fetchJson("/api/videos?" + qs).then((data) => {
         videos = data;
         applyFilters();
         updateSyncStatus("Synced " + new Date().toLocaleTimeString());
+        loadQueue();
     }).catch(() => {
         updateSyncStatus("Sync error");
+    });
+}
+
+function loadQueue() {
+    fetchJson("/api/queue").then(function (j) {
+        queue = j.queue || [];
+        renderQueue();
+    }).catch(function () {});
+}
+
+function renderQueue() {
+    const section = document.getElementById("queue-section");
+    const list = document.getElementById("queue-list");
+    if (queue.length === 0) {
+        section.style.display = "none";
+        return;
+    }
+    section.style.display = "block";
+    list.innerHTML = queue.map(function (v, i) {
+        return "<li class='queue-item' data-id='" + v.id + "' data-pos='" + i + "'>" +
+            "<span class='queue-item-title'>" + esc(v.title) + "</span>" +
+            "<span class='sub'>" + formatDuration(v.duration) + "</span>" +
+            "<button class='small-btn' data-remove-queue='" + v.id + "'>Remove</button>" +
+        "</li>";
+    }).join("");
+    list.querySelectorAll(".queue-item").forEach(function (item) {
+        item.addEventListener("click", function (e) {
+            if (e.target.classList.contains("small-btn")) return;
+            loadVideo(parseInt(item.dataset.id));
+        });
+    });
+    list.querySelectorAll("[data-remove-queue]").forEach(function (btn) {
+        btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            const id = parseInt(btn.dataset.removeQueue);
+            fetch("/api/queue/" + id, { method: "DELETE" }).then(function () {
+                loadQueue();
+            });
+        });
     });
 }
 
@@ -258,6 +320,22 @@ function loadVideo(id) {
     document.getElementById("video-title-input").value = v.title;
     document.getElementById("video-desc").value = v.description || "";
     document.getElementById("video-tags").value = v.tags || "";
+    // Favorite star button.
+    document.getElementById("fav-btn").textContent = v.favorite ? "\u2605 Favorited" : "\u2606 Favorite";
+    document.getElementById("fav-btn").onclick = function () {
+        toggleFavorite(v.id);
+        document.getElementById("fav-btn").textContent = v.favorite ? "\u2605 Favorited" : "\u2606 Favorite";
+    };
+    // Add to queue button.
+    document.getElementById("queue-btn").onclick = function () {
+        fetch("/api/queue", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ video_id: v.id })
+        }).then(function () {
+            loadQueue();
+        });
+    };
     // Clicking the title near the top begins editing it (#15).
     document.getElementById("video-title").onclick = function () {
         document.getElementById("video-title-input").focus();
@@ -291,10 +369,33 @@ function loadVideo(id) {
             activate("library");
         });
     };
+    // Resume playback from last position (resume playback feature).
+    player.addEventListener("loadedmetadata", function () {
+        fitVideo(player);
+        if (v.playback_position > 5) {
+            player.currentTime = v.playback_position;
+        }
+    });
+    // Save playback position when paused or ended.
+    player.addEventListener("pause", function () {
+        savePosition(v.id, player.currentTime);
+    });
+    player.addEventListener("ended", function () {
+        savePosition(v.id, v.duration || 0);
+    });
     loadPlayer(player, v, meta);
     fitVideo(player);
     updateDeleteButtons();
     activate("video");
+}
+
+function savePosition(id, position) {
+    if (!position) return;
+    fetch("/api/videos/" + id + "/position", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ position })
+    }).catch(function () {});
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +656,16 @@ function init() {
 
     document.getElementById("search-input").addEventListener("input", applyFilters);
     document.getElementById("codec-filter").addEventListener("input", applyFilters);
+    document.getElementById("fav-filter").addEventListener("change", applyFilters);
+    document.getElementById("sort-by").addEventListener("change", function () {
+        sortState.by = this.value;
+        renderLibrary();
+    });
+    document.getElementById("sort-order").addEventListener("click", function () {
+        sortState.order = sortState.order === "desc" ? "asc" : "desc";
+        this.textContent = sortState.order === "desc" ? "Desc \u25B8" : "Asc \u25B4";
+        renderLibrary();
+    });
     document.getElementById("admin-login-btn").addEventListener("click", () => {
         const password = document.getElementById("admin-password").value;
         if (!password) return;
@@ -643,6 +754,51 @@ function init() {
     window.addEventListener("resize", function () {
         fitVideo(videoPlayer);
         fitVideo(playbackPlayer);
+    });
+
+    // Keyboard shortcuts (resume playback / speed / seek).
+    document.addEventListener("keydown", function (e) {
+        // Don't trigger shortcuts when typing in an input.
+        const tag = e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        const p = videoPlayer;
+        if (p.style.display === "none") return;
+        switch (e.key) {
+            case " ":
+                e.preventDefault();
+                if (p.paused) p.play(); else p.pause();
+                break;
+            case "ArrowRight":
+                e.preventDefault();
+                p.currentTime = Math.min(p.duration, p.currentTime + 5);
+                break;
+            case "ArrowLeft":
+                e.preventDefault();
+                p.currentTime = Math.max(0, p.currentTime - 5);
+                break;
+            case "f":
+            case "F":
+                e.preventDefault();
+                const target = document.getElementById("video-wrap");
+                if (document.fullscreenElement === target) {
+                    document.exitFullscreen();
+                } else {
+                    target.requestFullscreen().catch(function () {});
+                }
+                break;
+            case "m":
+            case "M":
+                e.preventDefault();
+                p.muted = !p.muted;
+                break;
+            case "s":
+            case "S":
+                e.preventDefault();
+                const speeds = [1, 1.25, 1.5, 2];
+                const idx = speeds.indexOf(p.playbackRate);
+                p.playbackRate = speeds[(idx + 1) % speeds.length];
+                break;
+        }
     });
 
     renderLibrary();

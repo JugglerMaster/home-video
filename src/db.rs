@@ -33,6 +33,8 @@ pub struct Video {
     pub updated_at: String,
     pub hls_m3u8: String,
     pub thumbnail_path: String,
+    pub playback_position: f64,
+    pub favorite: bool,
 }
 
 fn now() -> String {
@@ -62,9 +64,10 @@ impl Db {
         Ok(Db { conn })
     }
 
-    /// Create the schema (idempotent).
+    /// Create the schema (idempotent). New columns are added via `ALTER TABLE`
+    /// only when absent, so existing databases migrate in place.
     pub fn create_schema(&self) -> anyhow::Result<()> {
-        let schema = r#"CREATE TABLE IF NOT EXISTS videos (
+        let tables = r#"CREATE TABLE IF NOT EXISTS videos (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 fingerprint    TEXT NOT NULL UNIQUE,
                 path           TEXT NOT NULL,
@@ -79,7 +82,9 @@ impl Db {
                 created_at     TEXT NOT NULL,
                 updated_at     TEXT NOT NULL,
                 hls_m3u8       TEXT,
-                thumbnail_path TEXT
+                thumbnail_path TEXT,
+                playback_position REAL NOT NULL DEFAULT 0,
+                favorite       INTEGER NOT NULL DEFAULT 0
             ); CREATE TABLE IF NOT EXISTS playlists (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL,
@@ -93,8 +98,20 @@ impl Db {
                 PRIMARY KEY (playlist_id, video_id),
                 FOREIGN KEY (playlist_id) REFERENCES playlists(id),
                 FOREIGN KEY (video_id) REFERENCES videos(id)
+            ); CREATE TABLE IF NOT EXISTS queue (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id   INTEGER NOT NULL,
+                position   INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
             );"#;
-        self.conn.execute_batch(schema)?;
+        self.conn.execute_batch(tables)?;
+        // Migrate existing databases: add new columns if they are missing.
+        self.add_column_if_missing("videos", "playback_position", "REAL NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("videos", "favorite", "INTEGER NOT NULL DEFAULT 0")?;
+        // Create indexes (after migration, so existing DBs have the columns).
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_video ON queue(video_id)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_favorite ON videos(favorite)", [])?;
         // FTS5 virtual table (S4).
         self.conn.execute("DROP TABLE IF EXISTS videos_fts", [])?;
         self.conn.execute(
@@ -118,6 +135,24 @@ impl Db {
         )?;
         // Rebuild the FTS index so existing rows are searchable (S4).
         self.backfill_fts()?;
+        Ok(())
+    }
+
+    /// Add a column to `table` if it is not already present. No-op (and no
+    /// error) when the column already exists, so migrations are idempotent.
+    fn add_column_if_missing(&self, table: &str, column: &str, type_def: &str) -> anyhow::Result<()> {
+        let mut stmt = self.conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(row.get::<_, String>(0)?)
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        let exists = out.iter().any(|c| c == column);
+        if !exists {
+            self.conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {type_def}"), [])?;
+        }
         Ok(())
     }
 
@@ -149,9 +184,20 @@ impl Db {
         Ok(self.conn.last_insert_rowid() as u64)
     }
 
-    /// List all videos.
-    pub fn get_videos(&self) -> anyhow::Result<Vec<Video>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM videos ORDER BY id DESC")?;
+    /// List all videos, optionally sorted by a whitelisted column.
+    /// `sort` is one of `date`, `duration`, `size`, `title` (default `date`);
+    /// `order` is `asc` or `desc` (default `desc`).
+    pub fn get_videos_sorted(&self, sort: &str, order: &str) -> anyhow::Result<Vec<Video>> {
+        let col = match sort {
+            "date" => "created_at",
+            "duration" => "COALESCE(duration, 0)",
+            "size" => "COALESCE(size, 0)",
+            "title" => "title",
+            _ => "created_at",
+        };
+        let ord = if order == "asc" { "ASC" } else { "DESC" };
+        let sql = format!("SELECT * FROM videos ORDER BY {} {}", col, ord);
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(Video {
                 id: row.get(0)?,
@@ -169,6 +215,8 @@ impl Db {
                 updated_at: row.get(12)?,
                 hls_m3u8: row.get(13)?,
                 thumbnail_path: row.get(14)?,
+                playback_position: row.get(15)?,
+                favorite: row.get(16)?,
             })
         })?;
         let mut out = Vec::new();
@@ -211,6 +259,8 @@ impl Db {
                 updated_at: row.get(12)?,
                 hls_m3u8: row.get(13)?,
                 thumbnail_path: row.get(14)?,
+                playback_position: row.get(15)?,
+                favorite: row.get(16)?,
             })
         })?;
         let mut out = Vec::new();
@@ -226,6 +276,82 @@ impl Db {
             "UPDATE videos SET title = ?1, description = ?2, tags = ?3, updated_at = ?4 WHERE id = ?5",
         )?;
         stmt.execute(params![title, description, tags, now(), id])?;
+        Ok(())
+    }
+
+    /// Toggle a video's favorite flag.
+    pub fn toggle_favorite(&self, id: u64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE videos SET favorite = 1 - favorite, updated_at = ?1 WHERE id = ?2",
+            params![now(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Update a video's playback position (and `updated_at`).
+    pub fn update_position(&self, id: u64, position: f64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE videos SET playback_position = ?1, updated_at = ?2 WHERE id = ?3",
+            params![position, now(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Add a video to the queue (position = next). Returns the new row id.
+    pub fn add_to_queue(&self, video_id: u64) -> anyhow::Result<u64> {
+        self.conn.execute(
+            "INSERT INTO queue (video_id, position, created_at) VALUES (?1, ?2, ?3)",
+            params![video_id, self.next_queue_position(), now()],
+        )?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    /// The next position in the queue (max position + 1, or 1 if empty).
+    fn next_queue_position(&self) -> i64 {
+        let mut stmt = match self.conn.prepare("SELECT COALESCE(MAX(position), 0) FROM queue") {
+            Ok(s) => s,
+            Err(_) => return 1,
+        };
+        let max: i64 = stmt.query_row([], |row| row.get(0)).unwrap_or_default();
+        max + 1
+    }
+
+    /// Get the queue, in position order.
+    pub fn get_queue(&self) -> anyhow::Result<Vec<Video>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.* FROM queue q JOIN videos v ON v.id = q.video_id ORDER BY q.position ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Video {
+                id: row.get(0)?,
+                fingerprint: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                description: row.get(4)?,
+                tags: row.get(5)?,
+                duration: row.get(6)?,
+                resolution: row.get(7)?,
+                codec: row.get(8)?,
+                size: row.get(9)?,
+                bitrate: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+                hls_m3u8: row.get(13)?,
+                thumbnail_path: row.get(14)?,
+                playback_position: row.get(15)?,
+                favorite: row.get(16)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Remove a queue item by id.
+    pub fn remove_from_queue(&self, queue_id: u64) -> anyhow::Result<()> {
+        self.conn.execute("DELETE FROM queue WHERE id = ?1", params![queue_id])?;
         Ok(())
     }
 
@@ -246,7 +372,7 @@ impl Db {
     /// Get a video by id. Returns `None` if the video does not exist.
     pub fn get_video_by_id(&self, id: u64) -> anyhow::Result<Option<Video>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, fingerprint, path, title, description, tags, duration, resolution, codec, size, bitrate, created_at, updated_at, hls_m3u8, thumbnail_path FROM videos WHERE id = ?1",
+            "SELECT id, fingerprint, path, title, description, tags, duration, resolution, codec, size, bitrate, created_at, updated_at, hls_m3u8, thumbnail_path, playback_position, favorite FROM videos WHERE id = ?1",
         )?;
         match stmt.query_row(params![id], |row| {
             Ok(Video {
@@ -265,6 +391,8 @@ impl Db {
                 updated_at: row.get(12)?,
                 hls_m3u8: row.get(13)?,
                 thumbnail_path: row.get(14)?,
+                playback_position: row.get(15)?,
+                favorite: row.get(16)?,
             })
         }) {
             Ok(v) => Ok(Some(v)),
@@ -366,6 +494,8 @@ impl Db {
                 updated_at: row.get(12)?,
                 hls_m3u8: row.get(13)?,
                 thumbnail_path: row.get(14)?,
+                playback_position: row.get(15)?,
+                favorite: row.get(16)?,
             })
         })?;
         let mut out = Vec::new();

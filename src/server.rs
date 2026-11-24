@@ -7,7 +7,7 @@ use axum::{
     },
     middleware::from_extractor_with_state,
     response::Response,
-    routing::{get, post},
+    routing::{get, post, delete},
     Router,
 };
 use axum::body::{Body, Bytes};
@@ -365,7 +365,7 @@ async fn list_videos(
     match db_guard.as_ref() {
         Some(db) => {
             let videos = if q.q.is_empty() {
-                db.get_videos()
+                db.get_videos_sorted(&q.sort, &q.order)
             } else {
                 db.search_videos(&q.q)
             };
@@ -391,6 +391,8 @@ async fn list_videos(
                                     String::new()
                                 },
                                 "playable": !v.hls_m3u8.is_empty(),
+                                "favorite": v.favorite,
+                                "playback_position": v.playback_position,
                             })
                         })
                         .collect();
@@ -414,6 +416,18 @@ async fn list_videos(
 struct VideoQuery {
     #[serde(default)]
     pub q: String,
+    #[serde(default = "default_sort")]
+    pub sort: String,
+    #[serde(default = "default_order")]
+    pub order: String,
+}
+
+fn default_sort() -> String {
+    "date".to_string()
+}
+
+fn default_order() -> String {
+    "desc".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +538,156 @@ async fn delete_video(
                 ),
             }
         }
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// POST /api/videos/:id/favorite → toggle favorite. Admin-only.
+async fn toggle_favorite(
+    State(state): State<AppState>,
+    PathExtract(id): PathExtract<u64>,
+    req: Request<Body>,
+) -> Response {
+    if !is_authenticated(&state, &req) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error": "not authenticated"}));
+    }
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.toggle_favorite(id) {
+            Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// POST /api/videos/:id/position → update playback position (resume). Admin-only.
+async fn update_position(
+    State(state): State<AppState>,
+    PathExtract(id): PathExtract<u64>,
+    req: Request<Body>,
+) -> Response {
+    if !is_authenticated(&state, &req) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error": "not authenticated"}));
+    }
+    let body_bytes = req.into_body().collect().await.expect("collect body").to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let position: f64 = match serde_json::from_str::<serde_json::Value>(&body_str) {
+        Ok(v) => match v.get("position").and_then(|p| p.as_f64()) {
+            Some(p) => p,
+            None => return json_response(StatusCode::BAD_REQUEST, json!({"error": "bad json"})),
+        },
+        Err(_) => return json_response(StatusCode::BAD_REQUEST, json!({"error": "bad json"})),
+    };
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.update_position(id, position) {
+            Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// POST /api/queue → add a video to the queue. Admin-only.
+async fn add_to_queue(
+    State(state): State<AppState>,
+    req: Request<Body>,
+) -> Response {
+    if !is_authenticated(&state, &req) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error": "not authenticated"}));
+    }
+    let body_bytes = req.into_body().collect().await.expect("collect body").to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let video_id: u64 = match serde_json::from_str::<serde_json::Value>(&body_str) {
+        Ok(v) => match v.get("video_id").and_then(|p| p.as_u64()) {
+            Some(id) => id,
+            None => return json_response(StatusCode::BAD_REQUEST, json!({"error": "bad json"})),
+        },
+        Err(_) => return json_response(StatusCode::BAD_REQUEST, json!({"error": "bad json"})),
+    };
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.add_to_queue(video_id) {
+            Ok(id) => json_response(StatusCode::CREATED, json!({"ok": true, "id": id})),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// GET /api/queue → list the queue. Public.
+async fn list_queue(
+    State(state): State<AppState>,
+) -> Response {
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.get_queue() {
+            Ok(videos) => {
+                let json_videos: Vec<serde_json::Value> = videos
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "id": v.id,
+                            "title": v.title,
+                            "duration": v.duration,
+                            "thumbnail": format!("/thumbnail/{}.jpg", v.id),
+                        })
+                    })
+                    .collect();
+                json_response(StatusCode::OK, json!({"queue": json_videos}))
+            }
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
+        None => json_response(
+            StatusCode::FORBIDDEN,
+            json!({"error": "not configured"}),
+        ),
+    }
+}
+
+/// DELETE /api/queue/:id → remove a queue item. Admin-only.
+async fn remove_from_queue(
+    State(state): State<AppState>,
+    PathExtract(id): PathExtract<u64>,
+    req: Request<Body>,
+) -> Response {
+    if !is_authenticated(&state, &req) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error": "not authenticated"}));
+    }
+    let db_guard = state.db.lock().unwrap();
+    match db_guard.as_ref() {
+        Some(db) => match db.remove_from_queue(id) {
+            Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": e.to_string()}),
+            ),
+        },
         None => json_response(
             StatusCode::FORBIDDEN,
             json!({"error": "not configured"}),
@@ -1047,7 +1211,7 @@ async fn settings_get(State(state): State<AppState>, req: Request<Body>) -> Resp
 
 /// GET /api/conversions → list of videos currently being converted
 /// (re-encoded) at ingest time. Admin-only.
-async fn list_conversions(State(state): State<AppState>, req: Request<Body>) -> Response {
+async fn list_conversions(State(state): State<AppState>, _req: Request<Body>) -> Response {
     // Public read-only endpoint: the conversion queue is a piece of
     // system state shown to all users in the UI banner.
     let conversions = state.conversions.lock().unwrap();
@@ -1082,6 +1246,14 @@ fn build_router(state: AppState) -> Router {
             "/api/videos/:id",
             post(update_video).delete(delete_video),
         )
+        .route(
+            "/api/videos/:id/favorite",
+            post(toggle_favorite),
+        )
+        .route(
+            "/api/videos/:id/position",
+            post(update_position),
+        )
         .route("/api/import", post(import_post))
         .route(
             "/api/playlists",
@@ -1096,6 +1268,11 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/playlists/:id/items",
             post(add_playlist_item).delete(remove_playlist_item),
+        )
+        .route("/api/queue", get(list_queue).post(add_to_queue))
+        .route(
+            "/api/queue/:id",
+            delete(remove_from_queue),
         )
         .route("/stream/*path", get(stream_file))
         .route("/thumbnail/*path", get(thumbnail_file))

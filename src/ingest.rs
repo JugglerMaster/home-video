@@ -412,6 +412,8 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
                     updated_at: now.clone(),
                     hls_m3u8: String::new(),
                     thumbnail_path: String::new(),
+                    playback_position: 0.0,
+                    favorite: false,
                 };
                 db.insert_video(&v)?
             }

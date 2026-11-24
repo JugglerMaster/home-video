@@ -32,9 +32,26 @@
                 </label>
                 <span id="selected-count" class="selected-count"></span>
                 <button id="delete-selected-btn" class="small-btn delete-btn" style="display:none;">Delete selected</button>
+                <span class="toolbar-spacer"></span>
+                <label class="sort-label">Sort
+                    <select id="sort-by">
+                        <option value="date">Date</option>
+                        <option value="duration">Duration</option>
+                        <option value="size">Size</option>
+                        <option value="title">Title</option>
+                    </select>
+                </label>
+                <button id="sort-order" class="small-btn" type="button" title="Toggle sort order">Desc &#9658;</button>
+                <label class="filter-label">
+                    <input id="fav-filter" type="checkbox"> Favorites
+                </label>
             </div>
             <p class="placeholder" id="empty">No videos yet. Add a watch dir in Admin and import a YouTube video.</p>
             <div id="library"></div>
+            <div id="queue-section" style="display:none;">
+                <h3>Queue</h3>
+                <ul id="queue-list"></ul>
+            </div>
         </section>
 
         <section id="tab-video" class="tab">
@@ -64,6 +81,8 @@
                     <input id="video-tags" type="text" placeholder="concert,2024">
                 </label>
                 <button id="save-video-btn" type="button">Save</button>
+                <button id="fav-btn" class="small-btn" type="button" title="Toggle favorite">&#9734; Favorite</button>
+                <button id="queue-btn" class="small-btn" type="button" title="Add to queue">Queue</button>
                 <button id="delete-video-btn" class="delete-btn" type="button" style="display:none;">Delete video</button>
             </div>
         </section>

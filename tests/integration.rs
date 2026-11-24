@@ -293,7 +293,7 @@ async fn full_ingest_pipeline_creates_video_and_artifacts() {
         .unwrap()
         .as_ref()
         .unwrap()
-        .get_videos()
+        .get_videos_sorted("date", "desc")
         .unwrap();
     assert!(videos.iter().any(|v| v.id == id), "video not in DB");
     let v = &videos[0];
@@ -340,7 +340,7 @@ async fn full_ingest_dedupe_skips_existing_fingerprint() {
         .unwrap()
         .as_ref()
         .unwrap()
-        .get_videos()
+        .get_videos_sorted("date", "desc")
         .unwrap()
         .len();
     assert_eq!(count, 1, "expected 1 video, got {count}");
