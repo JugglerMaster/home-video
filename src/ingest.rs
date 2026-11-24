@@ -2,7 +2,8 @@
 //
 // Scans watch dirs, dedupes by fingerprint (size + mtime + first-1MB sha256),
 // extracts metadata with ffprobe, generates a thumbnail with ffmpeg,
-// segments to HLS (copy-stream, no re-encode), and indexes into SQLite.
+// segments to HLS (copy-stream when possible, re-encode otherwise), and
+// indexes into SQLite.
 //
 // Layout under data_dir:
 //   home-video.db
@@ -25,6 +26,11 @@ const VIDEO_EXTS: [&str; 11] = [
     "mp4", "mkv", "avi", "mov", "webm",
     "m4v", "flv", "wmv", "ts", "m2ts", "3gp",
 ];
+
+/// Video codecs that can be copy-streamed into HLS without re-encoding
+/// (SPEC \u00a77). Everything else is re-encoded to a universally playable
+/// codec (H.264 + AAC) so it plays in all browsers.
+const COPY_STREAM_CODECS: [&str; 2] = ["h264", "hevc"];
 
 /// ffprobe metadata.
 #[derive(Clone, Debug)]
@@ -209,23 +215,41 @@ pub fn thumbnail(src: &Path, out: &Path) -> Result<()> {
     Err(anyhow::anyhow!("thumbnail failed for {}", src.display()))
 }
 
-/// Segment to HLS (copy-stream, no re-encode). Writes playlist.m3u8 + seg_*.ts
+/// Segment to HLS. Copy-stream (no re-encode) when the source video codec is
+/// H.264/HEVC; otherwise re-encode to a universally playable codec (H.264 +
+/// AAC) so the result plays in all browsers. Writes playlist.m3u8 + seg_*.ts
 /// into out_dir.
-pub fn hls(src: &Path, out_dir: &Path) -> Result<()> {
+pub fn hls(src: &Path, out_dir: &Path, codec: &str) -> Result<()> {
     fs::create_dir_all(out_dir)?;
     let src_str = src.display().to_string();
-    let output = std::process::Command::new("ffmpeg")
-        .current_dir(out_dir)
-        .args([
-            "-y",
-            "-i", src_str.as_str(),
-            "-c", "copy",
+    let mut args: Vec<String> = vec!["-y".into(), "-i".into(), src_str];
+    if COPY_STREAM_CODECS.contains(&codec) {
+        args.extend(["-c".into(), "copy".into()]);
+    } else {
+        // Re-encode to H.264 + AAC (universally playable in browsers).
+        args.extend(
+            [
+                "-c:v", "libx264", "-crf", "23", "-preset", "medium",
+                "-c:a", "aac", "-b:a", "192k",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+    }
+    args.extend(
+        [
             "-f", "hls",
             "-hls_time", "6",
             "-hls_list_size", "0",
             "-hls_segment_filename", "seg_%03d.ts",
             "playlist.m3u8",
-        ])
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    let output = std::process::Command::new("ffmpeg")
+        .current_dir(out_dir)
+        .args(&args)
         .output()
         .context("ffmpeg hls")?;
     if !output.status.success() {
@@ -298,18 +322,45 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
         }
     };
 
-    // Process.
+    // Process (best-effort: a single bad file must not abort the scan; a
+    // video that fails to become playable is still indexed and flagged).
     let hls_dir_id = hls_dir.join(video_id.to_string());
     fs::create_dir_all(&hls_dir_id)?;
     let thumb_path = thumb_dir.join(format!("{}.jpg", video_id));
-    thumbnail(path, &thumb_path)?;
-    hls(path, &hls_dir_id)?;
+    let thumb_ok = thumbnail(path, &thumb_path).is_ok();
+    if !thumb_ok {
+        eprintln!(
+            "video {video_id}: thumbnail failed (continuing; video may lack a thumbnail)"
+        );
+    }
+    let codec = probe.codec.clone();
+    let codec_owned = codec.clone();
+    let src_owned = path.to_path_buf();
+    let hls_dir_id_owned = hls_dir_id.clone();
+    let hls_ok = match tokio::task::spawn_blocking(move || {
+        hls(&src_owned, &hls_dir_id_owned, &codec_owned)
+    })
+    .await
+    {
+        Ok(inner) => inner.is_ok(),
+        Err(e) => {
+            eprintln!("video {video_id}: hls join error: {e}");
+            false
+        }
+    };
+    if !hls_ok {
+        eprintln!(
+            "video {video_id}: could not produce playable HLS (codec={codec}); marking unplayable"
+        );
+    }
 
     // Update DB.
     {
         let db_guard = state.db.lock().unwrap();
         if let Some(db) = &*db_guard {
-            db.update_paths(video_id, &format!("{video_id}/playlist.m3u8"), &format!("{video_id}.jpg"))?;
+            let m3u8 = if hls_ok { format!("{video_id}/playlist.m3u8") } else { String::new() };
+            let thumb = if thumb_ok { format!("{video_id}.jpg") } else { String::new() };
+            db.update_paths(video_id, &m3u8, &thumb)?;
         }
     }
 

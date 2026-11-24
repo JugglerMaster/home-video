@@ -1,394 +1,481 @@
-// home-video UI. Data wiring lands across S2/S4/S5/S6/S7.
-(function () {
-  "use strict";
+// State
+let videos = [];
+let playlists = [];
+let currentVideo = null;
+let currentPlaylist = null;
+let filteredVideos = [];
+let hls = null;
 
-  // --- State ---
-  var videos = [];
-  var currentVideo = null;
-  var hls = null;
+// Elements
+const links = document.querySelectorAll(".tab-link");
+const tabs = document.querySelectorAll(".tab");
 
-  // --- Tabs ---
-  var links = document.querySelectorAll(".tab-link");
-  var tabs = document.querySelectorAll(".tab");
+// Home tab to highlight (and return to) when a detail view is active.
+const DETAIL_HOME = { video: "library", playback: "playlist" };
 
-  function activate(name) {
-    links.forEach(function (l) { l.classList.toggle("active", l.dataset.tab === name); });
-    tabs.forEach(function (t) { t.classList.toggle("active", t.id === "tab-" + name); });
+function activate(name) {
+    const homeForDetail = DETAIL_HOME[name] || name;
+    links.forEach((l) => l.classList.toggle("active", l.dataset.tab === homeForDetail));
+    tabs.forEach((t) => t.classList.toggle("active", t.id === "tab-" + name));
     if (name === "library") renderLibrary();
     if (name === "playlist") loadPlaylists();
     if (name === "admin") renderAdmin();
-  }
-  links.forEach(function (l) {
-    l.addEventListener("click", function (e) { e.preventDefault(); activate(l.dataset.tab); });
-  });
+}
 
-  // --- Helpers ---
-  function esc(s) {
-    return (s == null ? "" : String(s)).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+links.forEach((l) => {
+    l.addEventListener("click", (e) => {
+        e.preventDefault();
+        activate(l.dataset.tab);
     });
-  }
-  function formatDuration(secs) {
-    if (!secs || secs <= 0) return "0:00";
-    var m = Math.floor(secs / 60);
-    var s = Math.floor(secs % 60);
+});
+
+// Back arrows (detail views return to their home tab).
+document.getElementById("back-to-library").addEventListener("click", () => activate("library"));
+document.getElementById("back-to-playlists").addEventListener("click", () => activate("playlist"));
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+    );
+}
+
+function formatDuration(d) {
+    if (!d) return "0:00";
+    const m = Math.floor(d / 60);
+    const s = Math.floor(d % 60);
     return m + ":" + (s < 10 ? "0" : "") + s;
-  }
-  function formatBytes(n) {
+}
+
+function formatBytes(n) {
     if (!n) return "0 B";
-    var units = ["B", "KB", "MB", "GB"];
-    var i = 0;
-    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-    return n.toFixed(1) + " " + units[i];
-  }
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(1) + " " + u[i];
+}
 
-  // --- Health check ---
-  var healthEl = document.getElementById("health");
-  function pollHealth() {
-    fetch("/health")
-      .then(function (r) { return r.ok ? r : Promise.reject(r); })
-      .then(function () { healthEl.textContent = "ok"; healthEl.className = "ok"; })
-      .catch(function () { healthEl.textContent = "unreachable"; healthEl.className = "err"; });
-  }
-  pollHealth();
-  setInterval(pollHealth, 5000);
+async function fetchJson(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+}
 
-  // --- Library (S2) ---
-  var gridEl = document.getElementById("video-grid");
-  var placeholderEl = document.getElementById("grid-placeholder");
-  var searchEl = document.getElementById("search-input");
-  var filterResEl = document.getElementById("filter-resolution");
-  var filterCodecEl = document.getElementById("filter-codec");
+// ---------------------------------------------------------------------------
+// Player helpers (shared by the single-video and playlist views)
+// ---------------------------------------------------------------------------
 
-  function fetchVideos() {
-    return fetch("/api/videos")
-      .then(function (r) { if (!r.ok) throw new Error("fetch failed " + r.status); return r.json(); })
-      .then(function (v) { return Array.isArray(v) ? v : []; });
-  }
+function renderVideoMeta(metaEl, v) {
+    let html =
+        "<p>Duration: " + formatDuration(v.duration) + "</p>" +
+        "<p>Resolution: " + esc(v.resolution) + "</p>" +
+        "<p>Codec: " + esc(v.codec) + "</p>";
+    if (v.size) html += "<p>Size: " + formatBytes(v.size) + "</p>";
+    if (v.bitrate) html += "<p>Bitrate: " + (v.bitrate / 1000).toFixed(0) + " kbps</p>";
+    metaEl.innerHTML = html;
+}
 
-  function renderLibrary() {
-    fetchVideos().then(function (list) {
-      videos = list;
-      populateFilters();
-      applyFilters();
-    }).catch(function () {
-      gridEl.innerHTML = "";
-      placeholderEl.style.display = "";
-      placeholderEl.textContent = "No videos yet (drop one into a watch dir).";
-    });
-  }
+function loadPlayer(playerEl, v, metaEl) {
+    if (!v.m3u8) {
+        playerEl.style.display = "none";
+        metaEl.innerHTML +=
+            "<p style='color:#ff5d5d;'>Not playable (conversion failed or unsupported codec).</p>";
+        return;
+    }
+    if (hls) { hls.destroy(); hls = null; }
+    playerEl.style.display = "block";
+    if (typeof Hls !== "undefined" && Hls.isSupported()) {
+        hls = new Hls({ hlsPlayOnMuted: true });
+        hls.loadSource(v.m3u8);
+        hls.attachMedia(playerEl);
+    } else if (playerEl.canPlayType("application/vnd.apple.mpegurl")) {
+        playerEl.src = v.m3u8;
+    } else {
+        metaEl.innerHTML +=
+            "<p style='color:#ff5d5d;'>HLS not supported in this browser.</p>";
+    }
+    playerEl.load();
+}
 
-  function populateFilters() {
-    var res = new Set(videos.map(function (v) { return v.resolution; }));
-    var codec = new Set(videos.map(function (v) { return v.codec; }));
-    filterResEl.innerHTML = '<option value="">All resolutions</option>' +
-      Array.from(res).sort().map(function (r) { return '<option value="' + esc(r) + '">' + esc(r) + '</option>'; }).join("");
-    filterCodecEl.innerHTML = '<option value="">All codecs</option>' +
-      Array.from(codec).sort().map(function (c) { return '<option value="' + esc(c) + '">' + esc(c) + '</option>'; }).join("");
-  }
+// Scale the player to fit its container while preserving aspect ratio.
+function fitVideo(player) {
+    if (!player || player.style.display === "none") return;
+    const wrap = player.parentElement;
+    const containerWidth = wrap.clientWidth || window.innerWidth;
+    const naturalW = player.videoWidth || 0;
+    const naturalH = player.videoHeight || 0;
+    if (naturalW > 0 && naturalH > 0) {
+        const aspect = naturalW / naturalH;
+        const availableHeight = window.innerHeight * 0.78;
+        const maxW = Math.min(containerWidth, availableHeight * aspect);
+        if (maxW < containerWidth) {
+            player.style.width = maxW + "px";
+            player.style.marginLeft = "auto";
+            player.style.marginRight = "auto";
+        } else {
+            player.style.width = "100%";
+            player.style.marginLeft = "";
+            player.style.marginRight = "";
+        }
+    } else {
+        player.style.width = "100%";
+    }
+}
 
-  function applyFilters() {
-    var q = searchEl.value.toLowerCase();
-    var res = filterResEl.value;
-    var codec = filterCodecEl.value;
-    var filtered = videos.filter(function (v) {
-      if (res && v.resolution !== res) return false;
-      if (codec && v.codec !== codec) return false;
-      if (q) {
-        var hay = (v.title + " " + (v.tags || "") + " " + (v.description || "")).toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-    gridEl.innerHTML = filtered.map(function (v) {
-      return '<div class="card" data-id="' + v.id + '">' +
-        '<img src="' + v.thumbnail + '" loading="lazy" alt="' + esc(v.title) + '">' +
-        '<div class="card-meta">' +
-          '<div class="card-title">' + esc(v.title) + '</div>' +
-          '<div class="card-sub">' + formatDuration(v.duration) + ' · ' + esc(v.resolution) + ' · ' + esc(v.codec) + '</div>' +
-        '</div>' +
-      '</div>';
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+
+function renderLibraryCards() {
+    const el = document.getElementById("library");
+    const cards = filteredVideos.map(function (v) {
+        const badge = v.m3u8 ? "" : "<div class='card-badge'>Not playable</div>";
+        return "<div class='card' data-id='" + v.id + "'>" +
+            "<img src='" + (v.thumbnail || "/static/thumbnail/default.jpg") + "' alt='' loading='lazy'>" +
+            badge +
+            "<div class='card-title'>" + esc(v.title) + "</div>" +
+            "<div class='card-sub'>" + formatDuration(v.duration) + " \u00b7 " + esc(v.codec) + "</div>" +
+        "</div>";
     }).join("");
-    placeholderEl.style.display = filtered.length ? "none" : "";
-    placeholderEl.textContent = filtered.length ? "" : "No videos match.";
-    gridEl.querySelectorAll(".card").forEach(function (card) {
-      card.addEventListener("click", function () { loadVideo(parseInt(card.dataset.id)); });
+    el.innerHTML = cards;
+    el.querySelectorAll(".card").forEach(function (card) {
+        card.addEventListener("click", function () {
+            loadVideo(parseInt(card.dataset.id));
+        });
     });
-  }
+}
 
-  function loadVideo(id) {
-    var v = videos.find(function (x) { return x.id === id; });
+function applyFilters() {
+    const q = document.getElementById("search-input").value.toLowerCase();
+    const codec = document.getElementById("codec-filter").value.toLowerCase();
+    filteredVideos = videos.filter((v) =>
+        (v.title.toLowerCase().includes(q) ||
+         v.description.toLowerCase().includes(q) ||
+         v.tags.toLowerCase().includes(q)) &&
+        (codec === "" || v.codec.toLowerCase().includes(codec))
+    );
+    renderLibraryCards();
+}
+
+function renderLibrary() {
+    fetchJson("/api/videos").then((videos) => {
+        videos = videos;
+        applyFilters();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Single-video view
+// ---------------------------------------------------------------------------
+
+function loadVideo(id) {
+    const v = videos.find((x) => x.id === id);
     if (!v) return;
     currentVideo = v;
     document.getElementById("video-title").textContent = v.title;
     document.getElementById("video-placeholder").style.display = "none";
-    var player = document.getElementById("video-player");
-    player.style.display = "block";
-    var meta = document.getElementById("video-meta");
+    const player = document.getElementById("video-player");
+    const meta = document.getElementById("video-meta");
+    const edit = document.getElementById("video-edit");
     meta.style.display = "block";
-    meta.innerHTML =
-      '<p>Duration: ' + formatDuration(v.duration) + '</p>' +
-      '<p>Resolution: ' + esc(v.resolution) + '</p>' +
-      '<p>Codec: ' + esc(v.codec) + '</p>' +
-      '<p>Size: ' + formatBytes(v.size) + '</p>' +
-      '<p>Bitrate: ' + (v.bitrate / 1000).toFixed(0) + ' kbps</p>';
-    var edit = document.getElementById("video-edit");
     edit.style.display = "block";
-    document.getElementById("edit-description").value = v.description || "";
-    document.getElementById("edit-tags").value = v.tags || "";
-    // Load HLS.
-    if (hls) { hls.destroy(); hls = null; }
-    if (typeof Hls !== "undefined" && Hls.isSupported()) {
-      hls = new Hls({ hlsPlayOnMuted: true });
-      hls.loadSource(v.m3u8);
-      hls.attachMedia(player);
-    } else if (player.canPlayType("application/vnd.apple.mpegurl")) {
-      player.src = v.m3u8;
-    } else {
-      meta.innerHTML += '<p style="color:#ff5d5d;">HLS not supported in this browser.</p>';
-    }
-  }
-
-  // Save video tags/description (S4).
-  document.getElementById("save-video").addEventListener("click", function () {
-    if (!currentVideo) return;
-    var desc = document.getElementById("edit-description").value;
-    var tags = document.getElementById("edit-tags").value;
-    fetch("/api/videos/" + currentVideo.id, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description: desc, tags: tags })
-    }).then(function (r) {
-      if (r.ok) {
-        var msg = document.createElement("p");
-        msg.style.color = "var(--accent)";
-        msg.textContent = "Saved.";
-        meta.appendChild(msg);
-      }
-    });
-  });
-
-  searchEl.addEventListener("input", applyFilters);
-  filterResEl.addEventListener("change", applyFilters);
-  filterCodecEl.addEventListener("change", applyFilters);
-
-  // Auto-refresh (60s).
-  setInterval(renderLibrary, 60000);
-  renderLibrary();
-
-  // --- Playlist (S5) ---
-  var playlistListEl = document.getElementById("playlist-list");
-  var playlistDetailEl = document.getElementById("playlist-detail");
-
-  function loadPlaylists() {
-    fetch("/api/playlists").then(function (r) {
-      if (!r.ok) { playlistListEl.innerHTML = ""; playlistDetailEl.innerHTML = ""; return; }
-    }).then(function (list) {
-      playlistListEl.innerHTML = list.map(function (p) {
-        return '<div class="list-item" data-id="' + p.id + '">' +
-          '<span>' + esc(p.name) + '</span>' +
-          '<span class="sub">' + (p.source === "youtube" ? "YouTube" : "manual") + ' · ' + (p.count || 0) + ' videos</span>' +
-        '</div>';
-      }).join("");
-      playlistListEl.querySelectorAll(".list-item").forEach(function (item) {
-        item.addEventListener("click", function () { loadPlaylistDetail(parseInt(item.dataset.id)); });
-      });
-    }).catch(function () { playlistListEl.innerHTML = ""; playlistDetailEl.innerHTML = ""; });
-  }
-
-  // New playlist button (S5).
-  var newPlaylistBtn = document.getElementById("new-playlist-btn");
-  if (newPlaylistBtn) {
-    newPlaylistBtn.addEventListener("click", function () {
-      var name = document.getElementById("new-playlist-name").value.trim();
-      if (!name) return;
-      fetch("/api/playlists", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name })
-      }).then(function (r) {
-        if (r.ok) { loadPlaylists(); }
-        else { return r.json().then(function (e) { alert("Failed: " + e.error); }); }
-      }).catch(function () { alert("Failed"); });
-    });
-  }
-
-  function loadPlaylistDetail(id) {
-    fetch("/api/playlists/" + id).then(function (r) {
-      if (!r.ok) { playlistDetailEl.innerHTML = ""; return; }
-      return r.json();
-    }).then(function (p) {
-      playlistDetailEl.innerHTML =
-        '<h3>' + esc(p.name) + '</h3>' +
-        '<div class="list">' +
-        (p.items || []).map(function (i) {
-          return '<div class="item"><span>' + esc(i.title) + '</span>' +
-            '<button data-id="' + i.video_id + '" class="remove-item">Remove</button></div>';
-        }).join("") +
-        '</div>' +
-        '<div style="margin-top:0.6rem;"><input type="text" id="add-playlist-title" placeholder="Add video title" style="width:70%; background:var(--panel); color:var(--fg); border:1px solid #2a2a2a; border-radius:6px; padding:0.3rem 0.5rem;">' +
-        '<button id="add-playlist-btn">Add</button></div>';
-      playlistDetailEl.querySelectorAll(".remove-item").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          fetch("/api/playlists/" + id + "/items", {
-            method: "DELETE",
+    renderVideoMeta(meta, v);
+    document.getElementById("video-desc").value = v.description || "";
+    document.getElementById("video-tags").value = v.tags || "";
+    document.getElementById("save-video-btn").onclick = function () {
+        fetch("/api/videos/" + v.id, {
+            method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ video_id: parseInt(btn.dataset.id) })
-          }).then(loadPlaylistDetail).catch(function () { loadPlaylistDetail(id); });
+            body: JSON.stringify({
+                description: document.getElementById("video-desc").value,
+                tags: document.getElementById("video-tags").value,
+            })
+        }).then(() => {
+            activate("library");
         });
-      });
-      var addBtn = document.getElementById("add-playlist-btn");
-      if (addBtn) {
-        addBtn.addEventListener("click", function () {
-          var title = document.getElementById("add-playlist-title").value.trim();
-          if (!title) return;
-          fetch("/api/videos?search=" + encodeURIComponent(title)).then(function (r) {
-            if (!r.ok) { alert("Search failed"); return; }
-            return r.json();
-          }).then(function (results) {
-            if (results.length === 0) {
-              alert("No videos found");
-              return;
-            }
-            if (results.length === 1) {
-              var v = results[0];
-              fetch("/api/playlists/" + id + "/items", {
+    };
+    loadPlayer(player, v, meta);
+    fitVideo(player);
+    activate("video");
+}
+
+// ---------------------------------------------------------------------------
+// Playlist playback view
+// ---------------------------------------------------------------------------
+
+function loadPlaylistPlayback(id) {
+    activate("playback");
+    const placeholder = document.getElementById("playback-placeholder");
+    placeholder.style.display = "block";
+    fetchJson("/api/playlists/" + id).then(function (p) {
+        currentPlaylist = p;
+        document.getElementById("playback-title").textContent = p.name;
+        const listEl = document.getElementById("playback-list");
+        const placeholder = document.getElementById("playback-placeholder");
+        const wrap = document.getElementById("playback-wrap");
+        const items = p.items || [];
+        if (items.length === 0) {
+            placeholder.style.display = "block";
+            wrap.style.display = "none";
+            listEl.innerHTML = "";
+            return;
+        }
+        placeholder.style.display = "none";
+        wrap.style.display = "block";
+        listEl.innerHTML = items.map(function (i) {
+            return "<div class='playback-item' data-id='" + i.video_id + "'>" +
+                "<span class='playback-item-title'>" + esc(i.title) + "</span>" +
+                "<span class='sub'>" + formatDuration(i.duration) + "</span>" +
+            "</div>";
+        }).join("");
+        listEl.querySelectorAll(".playback-item").forEach(function (item) {
+            item.addEventListener("click", function () {
+                playPlaybackItem(item);
+            });
+        });
+        playPlaybackItem(listEl.querySelector(".playback-item"));
+    });
+}
+
+function playPlaybackItem(itemEl) {
+    const id = parseInt(itemEl.dataset.id);
+    const item = currentPlaylist && currentPlaylist.items
+        ? currentPlaylist.items.find(function (x) { return x.video_id === id; })
+        : null;
+    if (!item) return;
+    const listEl = document.getElementById("playback-list");
+    listEl.querySelectorAll(".playback-item").forEach(function (el) { el.classList.remove("active"); });
+    itemEl.classList.add("active");
+    const player = document.getElementById("playback-player");
+    const meta = document.getElementById("playback-meta");
+    const wrap = document.getElementById("playback-wrap");
+    wrap.style.display = "block";
+    meta.style.display = "block";
+    renderVideoMeta(meta, item);
+    loadPlayer(player, item, meta);
+    fitVideo(player);
+}
+
+// Add/remove controls, shown from the playback view.
+function renderPlaylistManage(containerEl, playlistId) {
+    const list = containerEl.querySelector(".manage-list");
+    const addUrl = containerEl.querySelector(".manage-add-url");
+    const addBtn = containerEl.querySelector(".manage-add-btn");
+    fetchJson("/api/playlists/" + playlistId).then(function (p) {
+        list.innerHTML = (p.items || []).map(function (i) {
+            return "<div class='playlist-detail-item' data-id='" + i.video_id + "'>" +
+                "<span class='playlist-detail-title'>" + esc(i.title) + "</span>" +
+                "<button class='small-btn' data-remove='" + i.video_id + "'>Remove</button>" +
+            "</div>";
+        }).join("");
+        list.querySelectorAll("[data-remove]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                const vid = parseInt(btn.dataset.remove);
+                fetch("/api/playlists/" + playlistId + "/videos/" + vid, { method: "DELETE" }).then(function () {
+                    renderPlaylistManage(containerEl, playlistId);
+                });
+            });
+        });
+        addBtn.onclick = function () {
+            const url = addUrl.value.trim();
+            if (!url) return;
+            fetch("/api/playlists/" + playlistId + "/videos", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ video_id: v.id })
-              }).then(function () { loadPlaylistDetail(id); }).catch(function () { loadPlaylistDetail(id); });
-            } else {
-              // Show a dropdown of matches
-              var opts = results.map(function (v) {
-                return '<option value="' + v.id + '">' + esc(v.title) + ' (' + v.id + ')</option>';
-              }).join("");
-              var sel = document.createElement("select");
-              sel.innerHTML = opts;
-              sel.addEventListener("change", function () {
-                var vid = parseInt(sel.value);
-                fetch("/api/playlists/" + id + "/items", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ video_id: vid })
-                }).then(function () { loadPlaylistDetail(id); }).catch(function () { loadPlaylistDetail(id); });
-              });
-              playlistDetailEl.appendChild(sel);
-            }
-          }).catch(function () { alert("Search failed"); });
+                body: JSON.stringify({ url: url })
+            }).then(function () {
+                renderPlaylistManage(containerEl, playlistId);
+            });
+        };
+    });
+}
+
+document.getElementById("manage-playlist").addEventListener("click", function () {
+    const manage = document.getElementById("playback-manage");
+    const isHidden = manage.style.display === "none";
+    manage.style.display = isHidden ? "block" : "none";
+    if (isHidden && currentPlaylist) {
+        renderPlaylistManage(manage, currentPlaylist.id);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Playlists (list)
+// ---------------------------------------------------------------------------
+
+function loadPlaylists() {
+    fetchJson("/api/playlists").then((list) => {
+        playlists = list;
+        const el = document.getElementById("playlist-list");
+        el.innerHTML = playlists.map((p) =>
+            "<li class='playlist-item' data-id='" + p.id + "'>" +
+            "<span class='playlist-name'>" + esc(p.name) + "</span>" +
+            "<span class='playlist-count'>" + p.video_count + " video(s)</span>" +
+            "</li>"
+        ).join("");
+        el.querySelectorAll(".playlist-item").forEach(function (item) {
+            item.addEventListener("click", function () {
+                loadPlaylistPlayback(parseInt(item.dataset.id));
+            });
         });
-      }
-    }).catch(function () { playlistDetailEl.innerHTML = ""; });
-  }
+    });
+}
 
-  // --- Admin (S6/S7) ---
-  var adminVideosEl = document.getElementById("admin-videos");
-  var versionBanner = document.getElementById("version-banner");
+// ---------------------------------------------------------------------------
+// Admin (login + dashboard)
+// ---------------------------------------------------------------------------
 
-  function renderAdmin() {
-    fetch("/api/videos").then(function (r) {
-      if (!r.ok) { adminVideosEl.innerHTML = ""; return; }
-      return r.json();
-    }).then(function (list) {
-      adminVideosEl.innerHTML = list.map(function (v) {
-        return '<div class="list-item">' +
-          '<span>' + esc(v.title) + ' <span class="sub">(id ' + v.id + ')</span></span>' +
-          '<button class="delete-video" data-id="' + v.id + '">Delete</button></div>';
-      }).join("");
-      adminVideosEl.querySelectorAll(".delete-video").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          if (!confirm("Delete this video?")) return;
-          fetch("/api/videos/" + btn.dataset.id, { method: "DELETE" }).then(function () {
-            adminVideosEl.innerHTML = "";
-            renderLibrary();
-          }).catch(function () { alert("Delete failed"); });
+function renderAdmin() {
+    fetchJson("/api/session").then(function (j) {
+        const login = document.getElementById("admin-login");
+        const dashboard = document.getElementById("admin-dashboard");
+        if (j.authenticated) {
+            login.style.display = "none";
+            dashboard.style.display = "block";
+            renderAdminDashboard();
+        } else {
+            login.style.display = "block";
+            dashboard.style.display = "none";
+        }
+    });
+}
+
+function renderAdminDashboard() {
+    fetchJson("/api/videos").then(function (videos) {
+        const el = document.getElementById("admin-videos");
+        el.innerHTML = videos.map(function (v) {
+            return "<div class='admin-video'>" +
+                "<span class='admin-video-title'>" + esc(v.title) + "</span>" +
+                "<button class='small-btn' data-del='" + v.id + "'>Delete</button>" +
+            "</div>";
+        }).join("");
+        el.querySelectorAll("[data-del]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                const id = parseInt(btn.dataset.del);
+                fetch("/api/videos/" + id, { method: "DELETE" }).then(function () { renderAdmin(); });
+            });
         });
-      });
-    }).catch(function () { adminVideosEl.innerHTML = ""; });
-    checkVersion();
-    renderSettings();
-  }
-
-  function checkVersion() {
+    });
+    fetchJson("/api/settings").then(function (s) {
+        document.getElementById("watch-dirs").value = s.watch_dirs.join(", ");
+        document.getElementById("anonymous-view").checked = s.anonymous_view;
+    });
     fetch("/api/version").then(function (r) {
-      if (!r.ok) return;
-      return r.json();
-    }).then(function (v) {
-      if (v.update_available) {
-        versionBanner.style.display = "block";
-        versionBanner.innerHTML =
-          'Update available: current ' + esc(v.current_version) +
-          ' → latest ' + esc(v.latest_version) +
-          ' <span class="link" onclick="location.href=\'' + esc(v.repo_url) + '\'">repo</span>';
-      } else {
-        versionBanner.style.display = "none";
-      }
-    }).catch(function () { versionBanner.style.display = "none"; });
-  }
-  setInterval(checkVersion, 60000);
+        r.json().then(function (j) {
+            document.getElementById("version-banner").textContent =
+                j.version + " \u2014 " + (j.outdated ? "Update available: " + j.latest : "up to date");
+        });
+    });
+}
 
-  // Settings (S6).
-  var settingsEl = document.getElementById("admin-settings");
-  function renderSettings() {
-    if (!settingsEl) return;
-    fetch("/api/settings").then(function (r) {
-      if (!r.ok) { settingsEl.innerHTML = "<p>Not configured</p>"; return; }
-      return r.json();
-    }).then(function (s) {
-      settingsEl.innerHTML =
-        '<form id="settings-form">' +
-        '<div><label>Watch dirs (comma-separated)</label>' +
-        '<input type="text" id="settings-watch" value="' + esc(s.watch_dirs.join(", ")) + '"></div>' +
-        '<div><label>Data dir</label>' +
-        '<input type="text" id="settings-data" value="' + esc(s.data_dir) + '"></div>' +
-        '<div><label>Scan interval (s)</label>' +
-        '<input type="number" id="settings-interval" value="' + s.scan_interval_s + '"></div>' +
-        '<div><label><input type="checkbox" id="settings-anonymous" ' + (s.anonymous_view ? "checked" : "") + '> Anonymous view</label></div>' +
-        '<button type="submit" id="settings-save">Save</button>' +
-        '</form>';
-      var form = settingsEl.querySelector("#settings-form");
-      form.addEventListener("submit", function (e) {
-        e.preventDefault();
-        var watchDirs = document.getElementById("settings-watch").value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
-        fetch("/api/settings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            watch_dirs: watchDirs,
-            data_dir: document.getElementById("settings-data").value,
-            scan_interval_s: parseInt(document.getElementById("settings-interval").value, 10) || 30,
-            anonymous_view: document.getElementById("settings-anonymous").checked
-          })
-        }).then(function (r) {
-          if (r.ok) {
-            alert("Settings saved");
-          } else {
-            return r.json().then(function (e) { alert("Save failed: " + e.error); });
-          }
-        }).catch(function () { alert("Save failed"); });
-      });
-    }).catch(function () { settingsEl.innerHTML = "<p>Not configured</p>"; });
-  }
-  renderSettings();
-
-  // YouTube import (S3).
-  var ytBtn = document.getElementById("yt-import-btn");
-  var ytUrl = document.getElementById("yt-url");
-  if (ytBtn) {
-    ytBtn.addEventListener("click", function () {
-      var url = ytUrl.value.trim();
-      if (!url) return;
-      fetch("/api/import", {
+document.getElementById("admin-login-btn").addEventListener("click", function () {
+    const password = document.getElementById("admin-password").value;
+    fetch("/admin/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url })
-      }).then(function (r) {
-        if (r.ok) {
-          ytUrl.value = "";
-          renderLibrary();
+        body: JSON.stringify({ password: password })
+    }).then(function (r) {
+        if (r.status === 401) {
+            document.getElementById("admin-login-error").textContent = "Wrong password";
         } else {
-          r.json().then(function (e) { alert("Import failed: " + (e.error || e.message)); });
+            renderAdmin();
         }
-      }).catch(function () { alert("Import request failed"); });
     });
-  }
-})();
+});
+
+// ---------------------------------------------------------------------------
+// Fullscreen
+// ---------------------------------------------------------------------------
+
+document.querySelectorAll("[data-fullscreen]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+        const target = document.getElementById(btn.dataset.fullscreen);
+        if (!target) return;
+        if (document.fullscreenElement === target) {
+            document.exitFullscreen();
+        } else {
+            target.requestFullscreen().catch(function () {});
+        }
+    });
+});
+
+document.addEventListener("fullscreenchange", function () {
+    const isFullscreen = document.fullscreenElement !== null;
+    document.body.classList.toggle("fullscreen", isFullscreen);
+    document.querySelectorAll("[data-fullscreen]").forEach(function (btn) {
+        const target = document.getElementById(btn.dataset.fullscreen);
+        if (target) {
+            btn.textContent = document.fullscreenElement === target ? "Exit fullscreen" : "Fullscreen";
+        }
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+function init() {
+    document.getElementById("search-input").addEventListener("input", applyFilters);
+    document.getElementById("codec-filter").addEventListener("input", applyFilters);
+    document.getElementById("new-playlist-btn").addEventListener("click", () => {
+        const name = document.getElementById("new-playlist-name").value.trim();
+        fetch("/api/playlists", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name })
+        }).then(() => {
+            document.getElementById("new-playlist-name").value = "";
+            loadPlaylists();
+        });
+    });
+    document.getElementById("import-btn").addEventListener("click", () => {
+        const url = document.getElementById("youtube-url").value.trim();
+        if (!url) return;
+        fetch("/api/import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url })
+        }).then(() => {
+            document.getElementById("youtube-url").value = "";
+            renderLibrary();
+        });
+    });
+    document.getElementById("save-watch-dirs").addEventListener("click", () => {
+        const dirs = document.getElementById("watch-dirs").value.split(",").map(s => s.trim()).filter(Boolean);
+        fetch("/api/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ watch_dirs: dirs })
+        }).then(() => {
+            document.getElementById("watch-dirs-error").textContent = "";
+        });
+    });
+    document.getElementById("save-anonymous").addEventListener("click", () => {
+        fetch("/api/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ anonymous_view: document.getElementById("anonymous-view").checked })
+        }).then(() => {
+            document.getElementById("anonymous-error").textContent = "";
+        });
+    });
+
+    // Fit players when their metadata loads or the window resizes.
+    const videoPlayer = document.getElementById("video-player");
+    const playbackPlayer = document.getElementById("playback-player");
+    videoPlayer.addEventListener("loadedmetadata", function () { fitVideo(this); });
+    playbackPlayer.addEventListener("loadedmetadata", function () { fitVideo(this); });
+    window.addEventListener("resize", function () {
+        fitVideo(videoPlayer);
+        fitVideo(playbackPlayer);
+    });
+
+    renderLibrary();
+    loadPlaylists();
+    setInterval(renderLibrary, 60000);
+}
+
+init();

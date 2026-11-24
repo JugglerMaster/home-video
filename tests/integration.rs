@@ -146,12 +146,34 @@ async fn hls_generates_playlist_and_segments() {
     let dir = temp_dir();
     let src = make_video(&dir, "src.mp4");
     let out_dir = dir.join("hls_out");
-    ingest::hls(&src, &out_dir).expect("hls");
+    ingest::hls(&src, &out_dir, "h264").expect("hls");
     let playlist = out_dir.join("playlist.m3u8");
     assert!(playlist.exists(), "playlist.m3u8 missing");
     let m3u8 = std::fs::read_to_string(&playlist).unwrap();
     assert!(m3u8.starts_with("#EXTM3U"), "not an m3u8 playlist: {m3u8:?}");
     // At least one .ts segment referenced.
+    let segments: Vec<_> = m3u8.lines().filter(|l| l.ends_with(".ts")).collect();
+    assert!(!segments.is_empty(), "no .ts segments in playlist");
+    for seg in &segments {
+        assert!(out_dir.join(seg).exists(), "segment {seg} missing");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HLS re-encode (non copy-stream codec)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hls_reencodes_non_copy_codec() {
+    let dir = temp_dir();
+    let src = make_video(&dir, "src.mp4");
+    let out_dir = dir.join("hls_reenc_out");
+    // Force the re-encode branch by passing a non copy-stream codec.
+    ingest::hls(&src, &out_dir, "av1").expect("hls reencode");
+    let playlist = out_dir.join("playlist.m3u8");
+    assert!(playlist.exists(), "playlist.m3u8 missing");
+    let m3u8 = std::fs::read_to_string(&playlist).unwrap();
+    assert!(m3u8.starts_with("#EXTM3U"), "not an m3u8 playlist: {m3u8:?}");
     let segments: Vec<_> = m3u8.lines().filter(|l| l.ends_with(".ts")).collect();
     assert!(!segments.is_empty(), "no .ts segments in playlist");
     for seg in &segments {
