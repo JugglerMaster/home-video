@@ -36,6 +36,14 @@ use crate::import;
 const STATIC_DIR: &str = "./static";
 const CONFIG_PATH_DEFAULT: &str = "./config.json";
 
+/// A video currently being converted (re-encoded) at ingest time.
+#[derive(Clone, Debug)]
+pub struct ConversionItem {
+    pub video_id: u64,
+    pub title: String,
+    pub started_at: String,
+}
+
 /// Shared application state. The `Arc`s are shared between the config-guard
 /// middleware and the handlers, so the wizard's config write is visible to
 /// every subsequent request.
@@ -46,6 +54,7 @@ pub struct AppState {
     pub config: Arc<Mutex<Option<Config>>>,
     pub sessions: Arc<Mutex<HashSet<String>>>,
     pub db: Arc<Mutex<Option<Db>>>,
+    pub conversions: Arc<Mutex<Vec<ConversionItem>>>,
 }
 
 impl AppState {
@@ -56,6 +65,7 @@ impl AppState {
             config: Arc::new(Mutex::new(config)),
             sessions: Arc::new(Mutex::new(HashSet::new())),
             db: Arc::new(Mutex::new(db)),
+            conversions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -374,7 +384,12 @@ async fn list_videos(
                                 "size": v.size,
                                 "bitrate": v.bitrate,
                                 "thumbnail": format!("/thumbnail/{}.jpg", v.id),
-                                "m3u8": format!("/stream/{}/playlist.m3u8", v.id),
+                                "m3u8": if !v.hls_m3u8.is_empty() {
+                                    format!("/stream/{}", v.hls_m3u8)
+                                } else {
+                                    String::new()
+                                },
+                                "playable": !v.hls_m3u8.is_empty(),
                             })
                         })
                         .collect();
@@ -721,7 +736,12 @@ async fn get_playlist(
                         "resolution": v.resolution,
                         "codec": v.codec,
                         "thumbnail": format!("/thumbnail/{}.jpg", v.id),
-                        "m3u8": format!("/stream/{}/playlist.m3u8", v.id),
+                        "m3u8": if !v.hls_m3u8.is_empty() {
+                            format!("/stream/{}", v.hls_m3u8)
+                        } else {
+                            String::new()
+                        },
+                        "playable": !v.hls_m3u8.is_empty(),
                     })
                 })
                 .collect();
@@ -913,6 +933,19 @@ struct SettingsRequest {
     pub anonymous_view: bool,
     #[serde(default)]
     pub youtube_download_dir: Option<String>,
+    #[serde(default = "default_convert_quality")]
+    pub convert_quality: String,
+    #[serde(default = "default_convert_format")]
+    pub default_convert_format: String,
+    #[serde(default)]
+    pub convert_all: bool,
+}
+
+fn default_convert_quality() -> String {
+    "medium".to_string()
+}
+fn default_convert_format() -> String {
+    "h264".to_string()
 }
 
 /// POST /api/settings → re-edit watch dirs, data dir, scan interval, anonymous toggle.
@@ -941,6 +974,9 @@ async fn settings_post(
             if let Some(ytd) = body.youtube_download_dir {
                 new_c.youtube_download_dir = ytd;
             }
+            new_c.convert_quality = body.convert_quality;
+            new_c.default_convert_format = body.default_convert_format;
+            new_c.convert_all = body.convert_all;
             if let Err(e) = config::save(&state.config_path, &new_c) {
                 return json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -972,6 +1008,11 @@ async fn settings_get(State(state): State<AppState>, req: Request<Body>) -> Resp
                 "scan_interval_s": c.scan_interval_s,
                 "anonymous_view": c.anonymous_view,
                 "youtube_download_dir": c.youtube_download_dir,
+                "convert_quality": c.convert_quality,
+                "default_convert_format": c.default_convert_format,
+                "convert_all": c.convert_all,
+                "playback_supported_formats": ingest::PLAYBACK_SUPPORTED_FORMATS.to_vec(),
+                "convert_target_formats": ingest::CONVERT_TARGET_FORMATS.to_vec(),
             }),
         ),
         None => json_response(
@@ -979,6 +1020,29 @@ async fn settings_get(State(state): State<AppState>, req: Request<Body>) -> Resp
             json!({"error": "not configured"}),
         ),
     }
+}
+
+/// GET /api/conversions → list of videos currently being converted
+/// (re-encoded) at ingest time. Admin-only.
+async fn list_conversions(State(state): State<AppState>, req: Request<Body>) -> Response {
+    // Public read-only endpoint: the conversion queue is a piece of
+    // system state shown to all users in the UI banner.
+    let conversions = state.conversions.lock().unwrap();
+    let items: Vec<serde_json::Value> = conversions
+        .iter()
+        .map(|c| json!({
+            "video_id": c.video_id,
+            "title": c.title,
+            "started_at": c.started_at,
+        }))
+        .collect();
+    json_response(
+        StatusCode::OK,
+        json!({
+            "count": conversions.len(),
+            "items": items,
+        }),
+    )
 }
 
 /// Build the router with all routes and middleware.
@@ -1021,6 +1085,7 @@ fn build_router(state: AppState) -> Router {
             "/api/settings",
             get(settings_get).post(settings_post),
         )
+        .route("/api/conversions", get(list_conversions))
         .route("/*path", get(static_handler))
         .with_state(state.clone())
         .layer(from_extractor_with_state::<ConfigGuard, AppState>(state.clone()))
@@ -1113,6 +1178,9 @@ mod tests {
             anonymous_view: true,
             admin_password_hash: String::new(),
             version_check_url: String::new(),
+            convert_quality: "medium".to_string(),
+            default_convert_format: "h264".to_string(),
+            convert_all: true,
         };
         AppState::new(PathBuf::from("/tmp/nonexistent"), Some(cfg), 8080, None)
     }

@@ -8,7 +8,7 @@
 </head>
 <body>
     <header>
-        <div class="logo">Home&nbsp;Video</div>
+        <a href="#" class="logo" id="logo-home">Home&nbsp;Video</a>
         <nav>
             <a href="#" class="tab-link" data-tab="library">Library</a>
             <a href="#" class="tab-link" data-tab="playlist">Playlist</a>
@@ -20,9 +20,19 @@
         </div>
     </header>
 
+    <!-- Conversion queue notification (#11) -->
+    <div id="conversion-banner" class="banner" style="display:none;"></div>
+
     <main>
         <section id="tab-library" class="tab">
             <h2>Library</h2>
+            <div class="library-toolbar" id="library-toolbar">
+                <label class="select-all-label">
+                    <input id="select-all" type="checkbox"> Select all
+                </label>
+                <span id="selected-count" class="selected-count"></span>
+                <button id="delete-selected-btn" class="small-btn delete-btn" style="display:none;">Delete selected</button>
+            </div>
             <p class="placeholder" id="empty">No videos yet. Add a watch dir in Admin and import a YouTube video.</p>
             <div id="library"></div>
         </section>
@@ -47,6 +57,7 @@
                     <input id="video-tags" type="text" placeholder="concert,2024">
                 </label>
                 <button id="save-video-btn" type="button">Save</button>
+                <button id="delete-video-btn" class="delete-btn" type="button" style="display:none;">Delete video</button>
             </div>
         </section>
 
@@ -129,6 +140,41 @@
                         </label>
                         <button id="save-anonymous" type="button">Save</button>
                         <p class="error" id="anonymous-error"></p>
+                    </div>
+                </div>
+                <h3>Conversion settings</h3>
+                <div id="conversion-settings">
+                    <div class="settings-row">
+                        <label>Quality
+                            <select id="convert-quality">
+                                <option value="low">Low (fast, smaller)</option>
+                                <option value="medium" selected>Medium (default)</option>
+                                <option value="high">High (best quality)</option>
+                            </select>
+                        </label>
+                        <button id="save-convert-quality" type="button">Save</button>
+                        <p class="error" id="convert-quality-error"></p>
+                    </div>
+                    <div class="settings-row">
+                        <label>Default conversion format
+                            <select id="convert-format">
+                                <option value="h264" selected>H.264</option>
+                                <option value="hevc">HEVC</option>
+                            </select>
+                        </label>
+                        <button id="save-convert-format" type="button">Save</button>
+                        <p class="error" id="convert-format-error"></p>
+                    </div>
+                    <div class="settings-row">
+                        <label>Convert all videos
+                            <input id="convert-all" type="checkbox" checked>
+                        </label>
+                        <button id="save-convert-all" type="button">Save</button>
+                        <p class="error" id="convert-all-error"></p>
+                    </div>
+                    <div class="settings-info">
+                        <p>Playback-supported formats: <span id="playback-formats"></span></p>
+                        <p>Conversion target formats: <span id="target-formats"></span></p>
                     </div>
                 </div>
             </div>

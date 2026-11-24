@@ -75,11 +75,24 @@ fn make_state(data_dir: PathBuf, db: Db) -> AppState {
                 anonymous_view: true,
                 admin_password_hash: String::new(),
                 version_check_url: String::new(),
+                convert_quality: "medium".to_string(),
+                default_convert_format: "h264".to_string(),
+                convert_all: true,
             };
             Arc::new(Mutex::new(Some(cfg)))
         },
         sessions: Arc::new(Mutex::new(HashSet::new())),
         db: Arc::new(Mutex::new(Some(db))),
+        conversions: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+/// Default conversion settings (medium / h264 / convert-all on).
+fn default_convert() -> ingest::ConvertSettings {
+    ingest::ConvertSettings {
+        quality: "medium".to_string(),
+        target_format: "h264".to_string(),
+        convert_all: true,
     }
 }
 
@@ -146,7 +159,7 @@ async fn hls_generates_playlist_and_segments() {
     let dir = temp_dir();
     let src = make_video(&dir, "src.mp4");
     let out_dir = dir.join("hls_out");
-    ingest::hls(&src, &out_dir, "h264").expect("hls");
+    ingest::hls(&src, &out_dir, "h264", &default_convert()).expect("hls");
     let playlist = out_dir.join("playlist.m3u8");
     assert!(playlist.exists(), "playlist.m3u8 missing");
     let m3u8 = std::fs::read_to_string(&playlist).unwrap();
@@ -169,7 +182,7 @@ async fn hls_reencodes_non_copy_codec() {
     let src = make_video(&dir, "src.mp4");
     let out_dir = dir.join("hls_reenc_out");
     // Force the re-encode branch by passing a non copy-stream codec.
-    ingest::hls(&src, &out_dir, "av1").expect("hls reencode");
+    ingest::hls(&src, &out_dir, "av1", &default_convert()).expect("hls reencode");
     let playlist = out_dir.join("playlist.m3u8");
     assert!(playlist.exists(), "playlist.m3u8 missing");
     let m3u8 = std::fs::read_to_string(&playlist).unwrap();
@@ -179,6 +192,49 @@ async fn hls_reencodes_non_copy_codec() {
     for seg in &segments {
         assert!(out_dir.join(seg).exists(), "segment {seg} missing");
     }
+}
+
+// ---------------------------------------------------------------------------
+// HLS: conversion disabled leaves non-playback codecs unconverted
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hls_refuses_non_playback_when_conversion_off() {
+    let dir = temp_dir();
+    let src = make_video(&dir, "src.mp4");
+    let out_dir = dir.join("hls_conv_off");
+    let off = ingest::ConvertSettings {
+        quality: "medium".to_string(),
+        target_format: "h264".to_string(),
+        convert_all: false,
+    };
+    // av1 is not playback-supported and conversion is off → must fail.
+    let result = ingest::hls(&src, &out_dir, "av1", &off);
+    assert!(result.is_err(), "expected hls to fail when conversion is off");
+    assert!(
+        !out_dir.join("playlist.m3u8").exists(),
+        "no playlist should be written when conversion is off"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HLS: copy-stream codecs are unaffected by conversion settings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hls_copy_stream_ignores_convert_all_off() {
+    let dir = temp_dir();
+    let src = make_video(&dir, "src.mp4");
+    let out_dir = dir.join("hls_copy_conv_off");
+    let off = ingest::ConvertSettings {
+        quality: "medium".to_string(),
+        target_format: "h264".to_string(),
+        convert_all: false,
+    };
+    // h264 is playback-supported → copy-stream even when conversion is off.
+    ingest::hls(&src, &out_dir, "h264", &off).expect("hls copy-stream with convert_all off");
+    let playlist = out_dir.join("playlist.m3u8");
+    assert!(playlist.exists(), "playlist.m3u8 missing");
 }
 
 // ---------------------------------------------------------------------------

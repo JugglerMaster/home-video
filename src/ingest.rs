@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db::Video;
 use crate::server::AppState;
+use crate::server::ConversionItem;
 
 /// Video file extensions we recognize (case-insensitive).
 const VIDEO_EXTS: [&str; 11] = [
@@ -27,10 +28,92 @@ const VIDEO_EXTS: [&str; 11] = [
     "m4v", "flv", "wmv", "ts", "m2ts", "3gp",
 ];
 
-/// Video codecs that can be copy-streamed into HLS without re-encoding
-/// (SPEC \u00a77). Everything else is re-encoded to a universally playable
-/// codec (H.264 + AAC) so it plays in all browsers.
+/// Video codecs that can be copy-streamed into HLS without re-encoding and
+/// that browsers can play in HLS (the playback-supported list). Everything
+/// else is re-encoded to a universally playable codec so it plays in all
+/// browsers.
 const COPY_STREAM_CODECS: [&str; 2] = ["h264", "hevc"];
+
+/// Playback-supported formats: the set browsers can decode in HLS. A source
+/// codec in this set is copy-streamed; otherwise it must be converted.
+pub const PLAYBACK_SUPPORTED_FORMATS: [&str; 2] = ["h264", "hevc"];
+
+/// Formats we can convert a source to (the conversion target list).
+pub const CONVERT_TARGET_FORMATS: [&str; 2] = ["h264", "hevc"];
+
+/// Quality presets for re-encoding. (crf, preset). Lower CRF = better
+/// quality = bigger file. Defaults: medium.
+const QUALITY_PRESETS: &[(&str, &str, &str)] = &[
+    ("low", "28", "veryfast"),
+    ("medium", "23", "medium"),
+    ("high", "18", "slow"),
+];
+
+/// Settings read from the config that drive the HLS conversion step.
+#[derive(Clone, Debug)]
+pub struct ConvertSettings {
+    pub quality: String,
+    pub target_format: String,
+    pub convert_all: bool,
+}
+
+impl ConvertSettings {
+    /// Build from the app config.
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self {
+            quality: cfg.convert_quality.clone(),
+            target_format: cfg.default_convert_format.clone(),
+            convert_all: cfg.convert_all,
+        }
+    }
+
+    /// Look up the (crf, preset) for the configured quality; fall back to
+    /// medium when the string is unrecognized.
+    pub fn crf_preset(&self) -> (String, String) {
+        match QUALITY_PRESETS
+            .iter()
+            .find(|p| p.0 == self.quality.as_str())
+            .map(|p| (p.1.to_string(), p.2.to_string()))
+        {
+            Some((crf, preset)) => (crf, preset),
+            None => ("23".to_string(), "medium".to_string()),
+        }
+    }
+
+    /// Whether a source codec needs conversion (i.e. is not playback-supported).
+    pub fn needs_conversion(codec: &str) -> bool {
+        !COPY_STREAM_CODECS.contains(&codec)
+    }
+
+    /// Whether we should actually re-encode a non-playback codec. If
+    /// `convert_all` is off, non-playback codecs are left unconverted.
+    pub fn should_convert(&self, codec: &str) -> bool {
+        Self::needs_conversion(codec) && self.convert_all
+    }
+
+    /// Build the ffmpeg args for converting `codec` to `target_format` at the
+    /// configured quality. Returns None if the target format is unsupported.
+    pub fn convert_args(&self, _codec: &str) -> Option<Vec<String>> {
+        if !CONVERT_TARGET_FORMATS.contains(&self.target_format.as_str()) {
+            return None;
+        }
+        let (crf, preset) = self.crf_preset();
+        Some(
+            [
+                "-c:v", "libx264", "-crf", &crf, "-preset", &preset,
+                "-c:a", "aac", "-b:a", "192k",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        )
+    }
+
+    /// Whether the target format is a valid conversion target.
+    pub fn valid_target(&self) -> bool {
+        CONVERT_TARGET_FORMATS.contains(&self.target_format.as_str())
+    }
+}
 
 /// ffprobe metadata.
 #[derive(Clone, Debug)]
@@ -216,25 +299,32 @@ pub fn thumbnail(src: &Path, out: &Path) -> Result<()> {
 }
 
 /// Segment to HLS. Copy-stream (no re-encode) when the source video codec is
-/// H.264/HEVC; otherwise re-encode to a universally playable codec (H.264 +
-/// AAC) so the result plays in all browsers. Writes playlist.m3u8 + seg_*.ts
-/// into out_dir.
-pub fn hls(src: &Path, out_dir: &Path, codec: &str) -> Result<()> {
+/// H.264/HEVC; otherwise re-encode to the configured target format at the
+/// configured quality (if `convert_all` is on). If `convert_all` is off and
+/// the source codec is not playback-supported, return an error so the video
+/// is flagged unplayable. Writes playlist.m3u8 + seg_*.ts into out_dir.
+pub fn hls(src: &Path, out_dir: &Path, codec: &str, settings: &ConvertSettings) -> Result<()> {
     fs::create_dir_all(out_dir)?;
     let src_str = src.display().to_string();
     let mut args: Vec<String> = vec!["-y".into(), "-i".into(), src_str];
     if COPY_STREAM_CODECS.contains(&codec) {
         args.extend(["-c".into(), "copy".into()]);
+    } else if settings.should_convert(codec) {
+        match settings.convert_args(codec) {
+            Some(extra) => args.extend(extra),
+            None => {
+                let target = settings.target_format.clone();
+                return Err(anyhow::anyhow!(
+                    "unsupported target format for codec {codec}: {target}"
+                ));
+            }
+        }
     } else {
-        // Re-encode to H.264 + AAC (universally playable in browsers).
-        args.extend(
-            [
-                "-c:v", "libx264", "-crf", "23", "-preset", "medium",
-                "-c:a", "aac", "-b:a", "192k",
-            ]
-            .iter()
-            .map(|s| s.to_string()),
-        );
+        // convert_all is off and the source is not playback-supported: we
+        // cannot produce a playable HLS stream. Flag the video unplayable.
+        return Err(anyhow::anyhow!(
+            "codec {codec} is not playback-supported and conversion is disabled"
+        ));
     }
     args.extend(
         [
@@ -277,10 +367,10 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
 
     let probe = probe(path)?;
 
-    let data_dir = {
+    let (data_dir, convert) = {
         let cfg = state.config.lock().unwrap();
         match &*cfg {
-            Some(c) => c.data_dir.clone(),
+            Some(c) => (c.data_dir.clone(), ConvertSettings::from_config(c)),
             None => return Err(anyhow::anyhow!("not configured")),
         }
     };
@@ -337,8 +427,27 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
     let codec_owned = codec.clone();
     let src_owned = path.to_path_buf();
     let hls_dir_id_owned = hls_dir_id.clone();
+    let convert_owned = convert.clone();
+
+    // Track in-progress conversions so /api/conversions can report them.
+    let queue_entry: Option<ConversionItem> = if convert.should_convert(codec.as_str()) {
+        let entry = ConversionItem {
+            video_id,
+            title: path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            started_at: now.clone(),
+        };
+        { let mut q = state.conversions.lock().unwrap(); q.push(entry.clone()); }
+        Some(entry)
+    } else {
+        None
+    };
+
     let hls_ok = match tokio::task::spawn_blocking(move || {
-        hls(&src_owned, &hls_dir_id_owned, &codec_owned)
+        hls(&src_owned, &hls_dir_id_owned, &codec_owned, &convert_owned)
     })
     .await
     {
@@ -352,6 +461,12 @@ pub async fn ingest(state: &AppState, path: &Path) -> Result<Option<u64>> {
         eprintln!(
             "video {video_id}: could not produce playable HLS (codec={codec}); marking unplayable"
         );
+    }
+
+    // Drop from the conversion queue once the step is done (success or fail).
+    if let Some(entry) = &queue_entry {
+        let mut q = state.conversions.lock().unwrap();
+        q.retain(|c| c.video_id != entry.video_id);
     }
 
     // Update DB.

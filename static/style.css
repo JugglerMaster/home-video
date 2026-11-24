@@ -72,6 +72,38 @@ h3 { margin-top: 1.5rem; }
     gap: 1rem;
     margin-top: 1rem;
 }
+.library-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+    flex-wrap: wrap;
+}
+.select-all-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--muted);
+    cursor: pointer;
+}
+.select-all-label input {
+    width: 1rem;
+    height: 1rem;
+}
+.selected-count {
+    color: var(--muted);
+    font-size: 0.85rem;
+    min-width: 80px;
+}
+.card-checkbox-label {
+    display: inline-block;
+    margin-bottom: 0.3rem;
+}
+.card-checkbox {
+    width: 1.1rem;
+    height: 1.1rem;
+    cursor: pointer;
+}
 .card {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -234,6 +266,16 @@ h3 { margin-top: 1.5rem; }
     font-size: 0.85rem;
 }
 .small-btn:hover { border-color: var(--accent); }
+.delete-btn {
+    background: #3a1f1f;
+    color: #ff8a8a;
+    border-color: #6b2d2d;
+}
+.delete-btn:hover {
+    background: #5c2a2a;
+    color: #ffa0a0;
+    border-color: #8a3a3a;
+}
 
 /* Admin */
 .banner {

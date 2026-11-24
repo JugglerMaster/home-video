@@ -3,7 +3,8 @@
 // S1: JSON config (load/save/validate), default config on first run,
 // setup wizard writes it. Fields: watch_dirs, youtube_download_dir,
 // data_dir, scan_interval_s, anonymous_view, admin_password_hash,
-// version_check_url, port.
+// version_check_url, port. Plus conversion settings (quality, target format,
+// convert-all).
 //
 // See SPEC.md §10.
 
@@ -14,6 +15,9 @@ use std::path::PathBuf;
 pub const DEFAULT_VERSION_CHECK_URL: &str =
     "https://api.github.com/repos/JugglerMaster/home-video/releases/latest";
 
+/// Build a config from setup-wizard inputs. `port` and `version_check_url`
+/// default to sane values; the wizard supplies the rest. Conversion settings
+/// take their defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub port: u16,
@@ -24,10 +28,28 @@ pub struct Config {
     pub anonymous_view: bool,
     pub admin_password_hash: String,
     pub version_check_url: String,
+    // Conversion settings (S7+).
+    #[serde(default = "default_convert_quality")]
+    pub convert_quality: String,
+    #[serde(default = "default_convert_format")]
+    pub default_convert_format: String,
+    #[serde(default = "default_convert_all")]
+    pub convert_all: bool,
+}
+
+fn default_convert_quality() -> String {
+    "medium".to_string()
+}
+fn default_convert_format() -> String {
+    "h264".to_string()
+}
+fn default_convert_all() -> bool {
+    true
 }
 
 /// Build a config from setup-wizard inputs. `port` and `version_check_url`
-/// default to sane values; the wizard supplies the rest.
+/// default to sane values; the wizard supplies the rest. Conversion settings
+/// take their defaults.
 pub fn from_setup(
     port: u16,
     watch_dirs: Vec<String>,
@@ -46,6 +68,9 @@ pub fn from_setup(
         anonymous_view,
         admin_password_hash,
         version_check_url: DEFAULT_VERSION_CHECK_URL.to_string(),
+        convert_quality: default_convert_quality(),
+        default_convert_format: default_convert_format(),
+        convert_all: default_convert_all(),
     }
 }
 
@@ -78,6 +103,9 @@ pub fn validate(config: &Config) -> anyhow::Result<()> {
     }
     if config.port == 0 {
         return Err(anyhow::anyhow!("port must be > 0"));
+    }
+    if !["low", "medium", "high"].contains(&config.convert_quality.as_str()) {
+        return Err(anyhow::anyhow!("convert_quality must be one of low, medium, high"));
     }
     Ok(())
 }

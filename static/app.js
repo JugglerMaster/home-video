@@ -5,6 +5,9 @@ let currentVideo = null;
 let currentPlaylist = null;
 let filteredVideos = [];
 let hls = null;
+let session = { authenticated: false };
+let settings = null;
+let selectedIds = new Set();
 
 // Elements
 const links = document.querySelectorAll(".tab-link");
@@ -20,6 +23,7 @@ function activate(name) {
     if (name === "library") renderLibrary();
     if (name === "playlist") loadPlaylists();
     if (name === "admin") renderAdmin();
+    updateDeleteButtons();
 }
 
 links.forEach((l) => {
@@ -32,6 +36,12 @@ links.forEach((l) => {
 // Back arrows (detail views return to their home tab).
 document.getElementById("back-to-library").addEventListener("click", () => activate("library"));
 document.getElementById("back-to-playlists").addEventListener("click", () => activate("playlist"));
+
+// Logo links back to the home (Library) page (#10).
+document.getElementById("logo-home").addEventListener("click", (e) => {
+    e.preventDefault();
+    activate("library");
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -133,7 +143,11 @@ function renderLibraryCards() {
     const el = document.getElementById("library");
     const cards = filteredVideos.map(function (v) {
         const badge = v.m3u8 ? "" : "<div class='card-badge'>Not playable</div>";
+        const checked = selectedIds.has(v.id) ? "checked" : "";
         return "<div class='card' data-id='" + v.id + "'>" +
+            "<label class='card-checkbox-label'>" +
+                "<input type='checkbox' class='card-checkbox' value='" + v.id + "'>" + checked +
+            "</label>" +
             "<img src='" + (v.thumbnail || "/static/thumbnail/default.jpg") + "' alt='' loading='lazy'>" +
             badge +
             "<div class='card-title'>" + esc(v.title) + "</div>" +
@@ -142,10 +156,21 @@ function renderLibraryCards() {
     }).join("");
     el.innerHTML = cards;
     el.querySelectorAll(".card").forEach(function (card) {
-        card.addEventListener("click", function () {
+        card.addEventListener("click", function (e) {
+            // Don't trigger navigation when the checkbox is clicked.
+            if (e.target.classList.contains("card-checkbox")) return;
             loadVideo(parseInt(card.dataset.id));
         });
     });
+    el.querySelectorAll(".card-checkbox").forEach(function (cb) {
+        cb.addEventListener("change", function () {
+            const id = parseInt(cb.value);
+            if (cb.checked) selectedIds.add(id);
+            else selectedIds.delete(id);
+            updateSelectedCount();
+        });
+    });
+    updateSelectedCount();
 }
 
 function applyFilters() {
@@ -167,6 +192,45 @@ function renderLibrary() {
     });
 }
 
+function updateSelectedCount() {
+    const el = document.getElementById("selected-count");
+    el.textContent = selectedIds.size > 0 ? selectedIds.size + " selected" : "";
+}
+
+// "Select all" toggles every visible (filtered) video checkbox.
+function toggleSelectAll(checked) {
+    selectedIds.clear();
+    if (checked) {
+        filteredVideos.forEach(function (v) { selectedIds.add(v.id); });
+    }
+    document.querySelectorAll(".card-checkbox").forEach(function (cb) {
+        cb.checked = checked;
+    });
+    updateSelectedCount();
+}
+
+document.getElementById("select-all").addEventListener("change", function (e) {
+    toggleSelectAll(e.target.checked);
+});
+
+// Delete all selected videos (admin-only).
+document.getElementById("delete-selected-btn").addEventListener("click", function () {
+    if (!session.authenticated) return;
+    if (selectedIds.size === 0) return;
+    if (!confirm("Delete " + selectedIds.size + " video(s)?")) return;
+    const ids = Array.from(selectedIds);
+    let pending = ids.length;
+    ids.forEach(function (id) {
+        fetch("/api/videos/" + id, { method: "DELETE" }).then(function () {
+            pending--;
+            if (pending === 0) {
+                selectedIds.clear();
+                renderLibrary();
+            }
+        });
+    });
+});
+
 // ---------------------------------------------------------------------------
 // Single-video view
 // ---------------------------------------------------------------------------
@@ -187,7 +251,7 @@ function loadVideo(id) {
     document.getElementById("video-tags").value = v.tags || "";
     document.getElementById("save-video-btn").onclick = function () {
         fetch("/api/videos/" + v.id, {
-            method: "PUT",
+            method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 description: document.getElementById("video-desc").value,
@@ -197,8 +261,16 @@ function loadVideo(id) {
             activate("library");
         });
     };
+    document.getElementById("delete-video-btn").onclick = function () {
+        if (!session.authenticated) return;
+        if (!confirm("Delete " + v.title + "?")) return;
+        fetch("/api/videos/" + v.id, { method: "DELETE" }).then(function () {
+            activate("library");
+        });
+    };
     loadPlayer(player, v, meta);
     fitVideo(player);
+    updateDeleteButtons();
     activate("video");
 }
 
@@ -330,6 +402,7 @@ function loadPlaylists() {
 
 function renderAdmin() {
     fetchJson("/api/session").then(function (j) {
+        session = j;
         const login = document.getElementById("admin-login");
         const dashboard = document.getElementById("admin-dashboard");
         if (j.authenticated) {
@@ -340,6 +413,7 @@ function renderAdmin() {
             login.style.display = "block";
             dashboard.style.display = "none";
         }
+        updateDeleteButtons();
     });
 }
 
@@ -359,10 +433,7 @@ function renderAdminDashboard() {
             });
         });
     });
-    fetchJson("/api/settings").then(function (s) {
-        document.getElementById("watch-dirs").value = s.watch_dirs.join(", ");
-        document.getElementById("anonymous-view").checked = s.anonymous_view;
-    });
+    loadSettings();
     fetch("/api/version").then(function (r) {
         r.json().then(function (j) {
             document.getElementById("version-banner").textContent =
@@ -371,20 +442,60 @@ function renderAdminDashboard() {
     });
 }
 
-document.getElementById("admin-login-btn").addEventListener("click", function () {
-    const password = document.getElementById("admin-password").value;
-    fetch("/admin/login", {
+// Load the current settings and populate the form fields.
+function loadSettings() {
+    fetchJson("/api/settings").then(function (s) {
+        settings = s;
+        document.getElementById("watch-dirs").value = s.watch_dirs.join(", ");
+        document.getElementById("anonymous-view").checked = s.anonymous_view;
+        document.getElementById("convert-quality").value = s.convert_quality;
+        document.getElementById("convert-format").value = s.default_convert_format;
+        document.getElementById("convert-all").checked = s.convert_all;
+        document.getElementById("playback-formats").textContent = s.playback_supported_formats.join(", ");
+        document.getElementById("target-formats").textContent = s.convert_target_formats.join(", ");
+    });
+}
+
+// Save a modified copy of the current settings (the API expects a full object).
+function saveSettings(modifier, errorElId) {
+    if (!settings) return;
+    const newSettings = Object.assign({}, settings);
+    modifier(newSettings);
+    fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: password })
+        body: JSON.stringify(newSettings)
     }).then(function (r) {
-        if (r.status === 401) {
-            document.getElementById("admin-login-error").textContent = "Wrong password";
-        } else {
-            renderAdmin();
-        }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+    }).then(function () {
+        if (errorElId) document.getElementById(errorElId).textContent = "";
+        loadSettings();
+    }).catch(function (e) {
+        if (errorElId) document.getElementById(errorElId).textContent = e.message;
     });
-});
+}
+
+// ---------------------------------------------------------------------------
+// Conversion queue notification (#11)
+// ---------------------------------------------------------------------------
+
+function pollConversions() {
+    fetch("/api/conversions").then(function (r) {
+        if (!r.ok) return;
+        return r.json();
+    }).then(function (j) {
+        const banner = document.getElementById("conversion-banner");
+        if (j.count === 0) {
+            banner.style.display = "none";
+        } else {
+            banner.style.display = "block";
+            const titles = j.items.slice(0, 5).map(function (i) { return esc(i.title); }).join(", ");
+            const extra = j.count > 5 ? " + " + (j.count - 5) + " more" : "";
+            banner.textContent = "Converting " + j.count + " video(s): " + titles + extra;
+        }
+    }).catch(function () {});
+}
 
 // ---------------------------------------------------------------------------
 // Fullscreen
@@ -414,12 +525,45 @@ document.addEventListener("fullscreenchange", function () {
 });
 
 // ---------------------------------------------------------------------------
+// Admin-only delete button visibility
+// ---------------------------------------------------------------------------
+
+function updateDeleteButtons() {
+    const isAdmin = session.authenticated;
+    document.getElementById("delete-selected-btn").style.display = isAdmin ? "" : "none";
+    document.getElementById("delete-video-btn").style.display = isAdmin ? "" : "none";
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 function init() {
+    // Fetch the session so admin-only controls can be shown/hidden.
+    fetchJson("/api/session").then(function (j) {
+        session = j;
+        updateDeleteButtons();
+    });
+
     document.getElementById("search-input").addEventListener("input", applyFilters);
     document.getElementById("codec-filter").addEventListener("input", applyFilters);
+    document.getElementById("admin-login-btn").addEventListener("click", () => {
+        const password = document.getElementById("admin-password").value;
+        if (!password) return;
+        fetch("/admin/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password })
+        }).then(function (r) {
+            if (!r.ok) throw new Error("Invalid password");
+            return r.json();
+        }).then(function () {
+            document.getElementById("admin-login-error").textContent = "";
+            renderAdmin();
+        }).catch(function (e) {
+            document.getElementById("admin-login-error").textContent = e.message;
+        });
+    });
     document.getElementById("new-playlist-btn").addEventListener("click", () => {
         const name = document.getElementById("new-playlist-name").value.trim();
         fetch("/api/playlists", {
@@ -445,22 +589,19 @@ function init() {
     });
     document.getElementById("save-watch-dirs").addEventListener("click", () => {
         const dirs = document.getElementById("watch-dirs").value.split(",").map(s => s.trim()).filter(Boolean);
-        fetch("/api/settings", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ watch_dirs: dirs })
-        }).then(() => {
-            document.getElementById("watch-dirs-error").textContent = "";
-        });
+        saveSettings((s) => { s.watch_dirs = dirs; }, "watch-dirs-error");
     });
     document.getElementById("save-anonymous").addEventListener("click", () => {
-        fetch("/api/settings", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ anonymous_view: document.getElementById("anonymous-view").checked })
-        }).then(() => {
-            document.getElementById("anonymous-error").textContent = "";
-        });
+        saveSettings((s) => { s.anonymous_view = document.getElementById("anonymous-view").checked; }, "anonymous-error");
+    });
+    document.getElementById("save-convert-quality").addEventListener("click", () => {
+        saveSettings((s) => { s.convert_quality = document.getElementById("convert-quality").value; }, "convert-quality-error");
+    });
+    document.getElementById("save-convert-format").addEventListener("click", () => {
+        saveSettings((s) => { s.default_convert_format = document.getElementById("convert-format").value; }, "convert-format-error");
+    });
+    document.getElementById("save-convert-all").addEventListener("click", () => {
+        saveSettings((s) => { s.convert_all = document.getElementById("convert-all").checked; }, "convert-all-error");
     });
 
     // Fit players when their metadata loads or the window resizes.
@@ -476,6 +617,9 @@ function init() {
     renderLibrary();
     loadPlaylists();
     setInterval(renderLibrary, 60000);
+    // Conversion queue notification (#11).
+    pollConversions();
+    setInterval(pollConversions, 5000);
 }
 
 init();
