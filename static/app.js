@@ -186,10 +186,18 @@ function applyFilters() {
 }
 
 function renderLibrary() {
-    fetchJson("/api/videos").then((videos) => {
-        videos = videos;
+    updateSyncStatus("Syncing\u2026");
+    fetchJson("/api/videos").then((data) => {
+        videos = data;
         applyFilters();
+        updateSyncStatus("Synced " + new Date().toLocaleTimeString());
+    }).catch(() => {
+        updateSyncStatus("Sync error");
     });
+}
+
+function updateSyncStatus(text) {
+    document.getElementById("sync-status").textContent = text;
 }
 
 function updateSelectedCount() {
@@ -578,13 +586,36 @@ function init() {
     document.getElementById("import-btn").addEventListener("click", () => {
         const url = document.getElementById("youtube-url").value.trim();
         if (!url) return;
+        const btn = document.getElementById("import-btn");
+        const msgEl = document.getElementById("import-error");
+        const oldText = btn.textContent;
+        btn.textContent = "Importing\u2026";
+        btn.disabled = true;
+        msgEl.textContent = "";
+        msgEl.className = "error";
         fetch("/api/import", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url })
-        }).then(() => {
+        }).then(function (r) {
+            if (!r.ok) {
+                let msg = "Import failed (HTTP " + r.status + ")";
+                if (r.status === 401) msg = "Import requires admin login \u2014 log in first.";
+                throw new Error(msg);
+            }
+            return r.json();
+        }).then(function (j) {
+            const n = j.ingested || 0;
+            msgEl.textContent = n > 0 ? "Imported " + n + " video(s)." : "No new videos (already in library?).";
+            msgEl.className = "success";
             document.getElementById("youtube-url").value = "";
             renderLibrary();
+        }).catch(function (e) {
+            msgEl.textContent = e.message;
+            msgEl.className = "error";
+        }).finally(function () {
+            btn.textContent = oldText;
+            btn.disabled = false;
         });
     });
     document.getElementById("save-watch-dirs").addEventListener("click", () => {

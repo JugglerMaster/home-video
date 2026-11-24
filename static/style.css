@@ -64,6 +64,7 @@ h3 { margin-top: 1.5rem; }
 
 .placeholder { color: var(--muted); font-style: italic; }
 .error { color: #ff5d5d; font-size: 0.9rem; min-height: 1.2em; }
+.success { color: #2e7d32; font-size: 0.9rem; min-height: 1.2em; }
 
 /* Library */
 #library {
