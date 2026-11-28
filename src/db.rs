@@ -220,7 +220,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
-                audio_path: row.get(17)?,
+                audio_path: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -265,7 +265,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
-                audio_path: row.get(17)?,
+                audio_path: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -345,7 +345,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
-                audio_path: row.get(17)?,
+                audio_path: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -405,7 +405,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
-                audio_path: row.get(17)?,
+                audio_path: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
             })
         }) {
             Ok(v) => Ok(Some(v)),
@@ -509,7 +509,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
-                audio_path: row.get(17)?,
+                audio_path: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -608,6 +608,22 @@ mod tests {
         let db = Db::new(&path).unwrap();
         db.create_schema().unwrap();
         (db, dir)
+    }
+
+    #[test]
+    fn get_videos_sorted_handles_null_audio_path() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        // Simulate a row written by the pre-audio_column schema (NULL).
+        db.conn
+            .execute("UPDATE videos SET audio_path = NULL WHERE id = ?1", rusqlite::params![id])
+            .unwrap();
+        let v = db.get_videos_sorted("title", "desc").unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].audio_path, "");
+        // Also via get_video_by_id and search_videos.
+        assert_eq!(db.get_video_by_id(id).unwrap().unwrap().audio_path, "");
+        assert_eq!(db.search_videos("Alpha").unwrap()[0].audio_path, "");
     }
 
     #[test]
