@@ -63,6 +63,7 @@ the SQLite schema. Until complete, all other routes return "not configured".
 | `anonymous_view` | bool | Allow non-authenticated browse/play |
 | `admin_password_hash` | string | argon2id hash (set by the wizard) |
 | `version_check_url` | string | GitHub Releases check URL |
+| `upnp` | object | Sonos/UPnP casting (see below) |
 
 ## API routes (axum 0.7)
 
@@ -86,6 +87,9 @@ A literal `{id}` segment never matches, so requests fall through to the
 | `POST` | `/admin/login` | Log in (sets HttpOnly session cookie) |
 | `POST` | `/admin/logout` | Log out |
 | `GET` | `/api/session` | `{"authenticated": bool}` |
+| `GET` | `/api/speakers` | List discovered speakers (online status) |
+| `POST` | `/api/cast/:video_id/:speaker_id` | Cast a pre-baked audio file to a speaker (admin, `{"volume": 0..100}`) |
+| `GET` | `/audio/:id` | Serve a pre-baked direct audio file (`audio_path`) |
 
 A regression test in `src/server.rs` asserts that `GET /api/videos/1` matches
 the specific route (405 with `Allow: POST, DELETE`) rather than the catch-all.
@@ -126,8 +130,39 @@ Then open http://localhost:8080, complete the setup wizard, and drop videos
 into `watch/`. They appear in the Library within the scan interval with a
 thumbnail and a working HLS stream.
 
-To update: `docker compose pull && docker compose up -d` (the "update
-available" banner in the Admin tab points at the GitHub Releases page).
+To update: run `scripts/deploy.sh` on the NAS, or equivalently `git pull &&
+docker compose up -d --build`. The "update available" banner in the Admin
+tab points at the GitHub Releases page.
+
+
+## UPnP / Sonos casting (Phase 3)
+
+Optional. `config.json` may include an `upnp` block:
+
+```json
+"upnp": {
+  "enabled": true,
+  "discovery_interval_s": 30,
+  "server_ip": "192.168.1.42"
+}
+```
+
+- `server_ip` — the LAN IP this server listens on (needed so the speaker can
+  fetch the audio URI). If unset, the host is auto-detected; `127.0.0.1` or
+  loopback are rejected loudly rather than guessed.
+- `discovery_interval_s` — SSDP rescan interval.
+
+Audio is pre-baked at ingest (`data/audio/<video_id>.m4a`, AAC 192k, stored as
+`audio_path` in the DB). The web cast flow POSTs to `/api/cast/:video_id/:speaker_id`;
+the CLI mirrors it:
+
+```sh
+home-video cast <videoId> <speakerId> [--volume N]
+```
+
+Requires `POST /api/cast/:video_id/:speaker_id` to be admin-authenticated (the
+video + speaker ids are path parameters; the optional body is `{"volume": 0..100}`,
+default 50).
 
 ## Future work
 

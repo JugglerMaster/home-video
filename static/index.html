@@ -32,6 +32,7 @@
                 </label>
                 <span id="selected-count" class="selected-count"></span>
                 <button id="delete-selected-btn" class="small-btn delete-btn" style="display:none;">Delete selected</button>
+                <span id="delete-selected-error" class="error" style="font-size:0.8rem;"></span>
                 <span class="toolbar-spacer"></span>
                 <label class="sort-label">Sort
                     <select id="sort-by">
@@ -63,9 +64,9 @@
             <div id="video-wrap" class="video-wrap">
                 <video id="video-player" controls playsinline style="display:none;">
                 </video>
-                <div id="video-controls" class="video-controls">
-                    <button id="fit-btn" class="small-btn" type="button" title="Fit to screen">Fit</button>
-                    <button id="fill-btn" class="small-btn" type="button" title="Fill screen">Fill</button>
+                <div id="video-controls" class="video-controls" style="display:none;">
+                    <button id="fit-btn" class="fit-btn" type="button" title="Fit to screen" aria-pressed="true">Fit</button>
+                    <button id="fill-btn" class="fit-btn" type="button" title="Fill screen" aria-pressed="false">Fill</button>
                 </div>
             </div>
             <div id="video-meta" class="meta" style="display:none;"></div>
@@ -84,6 +85,27 @@
                 <button id="fav-btn" class="small-btn" type="button" title="Toggle favorite">&#9734; Favorite</button>
                 <button id="queue-btn" class="small-btn" type="button" title="Add to queue">Queue</button>
                 <button id="delete-video-btn" class="delete-btn" type="button" style="display:none;">Delete video</button>
+                <p class="error" id="video-delete-error"></p>
+            </div>
+
+            <!-- UPnP/Sonos casting (Phase 2). Admin-only, shown in the video view.
+                 Preparing the cast command; no audio is sent until the user clicks Cast. -->
+            <div id="video-cast" style="display:none;">
+                <h3>Cast to speaker</h3>
+                <div class="settings-row">
+                    <label>Speaker
+                        <select id="cast-speaker" disabled>
+                            <option value="">Loading speakers…</option>
+                        </select>
+                    </label>
+                    <label>Volume
+                        <input id="cast-volume" type="range" min="0" max="100" value="50">
+                        <span id="cast-volume-value">50</span>
+                    </label>
+                    <button id="cast-btn" type="button">Cast</button>
+                    <span id="cast-last-seen" class="muted"></span>
+                    <p class="error" id="cast-error"></p>
+                </div>
             </div>
         </section>
 
@@ -147,25 +169,35 @@
                         <p class="error" id="import-error"></p>
                     </div>
                 </div>
-                <h3>Settings</h3>
-                <div id="settings">
+                <h3>Library</h3>
+                <div id="library-settings" class="settings-group">
                     <div class="settings-row">
                         <label>Watch dirs (comma-separated)
                             <input id="watch-dirs">
                         </label>
-                        <button id="save-watch-dirs" type="button">Save</button>
-                        <p class="error" id="watch-dirs-error"></p>
                     </div>
                     <div class="settings-row">
-                        <label>Anonymous view (checkbox)
-                            <input id="anonymous-view" type="checkbox">
+                        <label>Data directory
+                            <input id="data-dir">
                         </label>
-                        <button id="save-anonymous" type="button">Save</button>
-                        <p class="error" id="anonymous-error"></p>
+                    </div>
+                    <div class="settings-row">
+                        <label>Scan interval (seconds)
+                            <input id="scan-interval" type="number" min="1" step="1">
+                        </label>
+                    </div>
+                    <div class="settings-row">
+                        <label>YouTube download dir (optional)
+                            <input id="youtube-download-dir" placeholder="default: <data directory>/youtube">
+                        </label>
+                    </div>
+                    <div class="settings-row toggle-row">
+                        <label for="anonymous-view">Anonymous view</label>
+                        <input id="anonymous-view" type="checkbox" aria-label="Allow anonymous view">
                     </div>
                 </div>
-                <h3>Conversion settings</h3>
-                <div id="conversion-settings">
+                <h3>Conversion</h3>
+                <div id="conversion-settings" class="settings-group">
                     <div class="settings-row">
                         <label>Quality
                             <select id="convert-quality">
@@ -174,8 +206,6 @@
                                 <option value="high">High (best quality)</option>
                             </select>
                         </label>
-                        <button id="save-convert-quality" type="button">Save</button>
-                        <p class="error" id="convert-quality-error"></p>
                     </div>
                     <div class="settings-row">
                         <label>Default conversion format
@@ -184,20 +214,38 @@
                                 <option value="hevc">HEVC</option>
                             </select>
                         </label>
-                        <button id="save-convert-format" type="button">Save</button>
-                        <p class="error" id="convert-format-error"></p>
                     </div>
-                    <div class="settings-row">
-                        <label>Convert all videos
-                            <input id="convert-all" type="checkbox" checked>
-                        </label>
-                        <button id="save-convert-all" type="button">Save</button>
-                        <p class="error" id="convert-all-error"></p>
+                    <div class="settings-row toggle-row">
+                        <label for="convert-all">Convert all videos</label>
+                        <input id="convert-all" type="checkbox" checked aria-label="Convert all videos">
                     </div>
                     <div class="settings-info">
                         <p>Playback-supported formats: <span id="playback-formats"></span></p>
                         <p>Conversion target formats: <span id="target-formats"></span></p>
                     </div>
+                </div>
+                <h3>UPnP / Sonos casting</h3>
+                <div id="upnp-settings" class="settings-group">
+                    <div class="settings-row toggle-row">
+                        <label for="upnp-enabled">Enabled</label>
+                        <input id="upnp-enabled" type="checkbox" aria-label="Enable UPnP/Sonos casting">
+                    </div>
+                    <div class="settings-row">
+                        <label>Discovery interval (seconds)
+                            <input id="upnp-discovery-interval" type="number" min="1" step="1">
+                        </label>
+                    </div>
+                    <div class="settings-row">
+                        <label>Server IP (optional; empty = auto-detect on LAN)
+                            <input id="upnp-server-ip" placeholder="e.g. 192.168.1.10">
+                        </label>
+                    </div>
+                    <p class="muted small">Audio is pre-baked at ingest. The renderer fetches
+                        the audio URI at <code>http://&lt;server_ip&gt;:&lt;port&gt;/audio/&lt;video_id&gt;</code>.</p>
+                </div>
+                <div class="settings-footer">
+                    <button id="save-settings" type="button">Save settings</button>
+                    <p class="error" id="settings-error"></p>
                 </div>
             </div>
         </section>
@@ -207,6 +255,7 @@
         <span id="sync-status">Syncing&#8230;</span>
     </footer>
 
+    <script src="/logic.js"></script>
     <script src="/app.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.12/dist/hls.min.js" defer></script>
 </body>

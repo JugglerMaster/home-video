@@ -33,6 +33,7 @@ fn sample_video(title: &str, fp: &str) -> Video {
         thumbnail_path: String::new(),
         playback_position: 0.0,
         favorite: false,
+        audio_path: String::new(),
     }
 }
 

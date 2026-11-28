@@ -11,18 +11,26 @@ let selectedIds = new Set();
 let sortState = { by: "date", order: "desc" };
 let favFilter = false;
 let queue = [];
+let speakers = [];
+let castVolume = 50;
 
 // Elements
 const links = document.querySelectorAll(".tab-link");
 const tabs = document.querySelectorAll(".tab");
 
 // Home tab to highlight (and return to) when a detail view is active.
-const DETAIL_HOME = { video: "library", playback: "playlist" };
+const AppLogic = window.AppLogic;
 
 function activate(name) {
-    const homeForDetail = DETAIL_HOME[name] || name;
+    const homeForDetail = AppLogic.homeForTab(name);
     links.forEach((l) => l.classList.toggle("active", l.dataset.tab === homeForDetail));
     tabs.forEach((t) => t.classList.toggle("active", t.id === "tab-" + name));
+    // Persist the home tab so a refresh lands back on the same section
+    // instead of on a blank page. Detail views (video/playback) restore to
+    // their home on refresh.
+    try {
+        sessionStorage.setItem("active_tab", homeForDetail);
+    } catch (e) {}
     if (name === "library") renderLibrary();
     if (name === "playlist") loadPlaylists();
     if (name === "admin") renderAdmin();
@@ -100,6 +108,9 @@ function loadPlayer(playerEl, v, metaEl) {
     }
     if (hls) { hls.destroy(); hls = null; }
     playerEl.style.display = "block";
+    if ( playerEl.id === "video-player" ) {
+        document.getElementById("video-controls").style.display = "flex";
+    }
     if (typeof Hls !== "undefined" && Hls.isSupported()) {
         hls = new Hls({ hlsPlayOnMuted: true });
         hls.loadSource(v.m3u8);
@@ -117,6 +128,7 @@ function loadPlayer(playerEl, v, metaEl) {
 function fitVideo(player) {
     if (!player || player.style.display === "none") return;
     const wrap = player.parentElement;
+    if (wrap && wrap.classList && wrap.classList.contains("fill-active")) return;
     const containerWidth = wrap.clientWidth || window.innerWidth;
     const naturalW = player.videoWidth || 0;
     const naturalH = player.videoHeight || 0;
@@ -160,6 +172,16 @@ function renderLibraryCards() {
         "</div>";
     }).join("");
     el.innerHTML = cards;
+    const emptyEl = document.getElementById("empty");
+    if (!filteredVideos || filteredVideos.length === 0) {
+        const isSearching = videos.length > 0;
+        emptyEl.textContent = isSearching
+            ? "No videos match your search."
+            : "No videos yet. Add a watch dir in Admin and import a YouTube video.";
+        emptyEl.style.display = "block";
+    } else {
+        emptyEl.style.display = "none";
+    }
     el.querySelectorAll(".card").forEach(function (card) {
         card.addEventListener("click", function (e) {
             // Don't trigger navigation when the checkbox or favorite star is clicked.
@@ -288,13 +310,26 @@ document.getElementById("delete-selected-btn").addEventListener("click", functio
     if (!session.authenticated) return;
     if (selectedIds.size === 0) return;
     if (!confirm("Delete " + selectedIds.size + " video(s)?")) return;
-    const ids = Array.from(selectedIds);
-    let pending = ids.length;
+    var err = document.getElementById("delete-selected-error");
+    var ids = Array.from(selectedIds);
+    var pending = ids.length;
+    var failed = [];
     ids.forEach(function (id) {
-        fetch("/api/videos/" + id, { method: "DELETE" }).then(function () {
+        fetch("/api/videos/" + id, { method: "DELETE" }).then(function (r) {
+            if (r.ok) {
+                selectedIds.delete(id);
+            } else {
+                failed.push(id);
+                r.json().catch(function () { return {}; }).then(function (d) {
+                    if (err && d.error) err.textContent = "Delete failed: " + d.error;
+                });
+            }
             pending--;
             if (pending === 0) {
-                selectedIds.clear();
+                if (failed.length && !err.textContent) {
+                    err.textContent = failed.length + " video(s) could not be deleted.";
+                }
+                if (!failed.length && err) err.textContent = "";
                 renderLibrary();
             }
         });
@@ -309,6 +344,8 @@ function loadVideo(id) {
     const v = videos.find((x) => x.id === id);
     if (!v) return;
     currentVideo = v;
+    const errEl = document.getElementById("video-delete-error");
+    if (errEl) errEl.textContent = "";
     document.getElementById("video-title").textContent = v.title;
     document.getElementById("video-placeholder").style.display = "none";
     const player = document.getElementById("video-player");
@@ -354,19 +391,43 @@ function loadVideo(id) {
             activate("library");
         });
     };
-    // Fit/fill modes (#12).
+    // Fit/fill modes (#12). Fit = contain the video centered; Fill = let it
+    // fill the available space (object-fit cover).
+    const wrap = document.getElementById("video-wrap");
+    function setFill(fill) {
+        wrap.classList.toggle("fill-active", fill);
+        document.getElementById("fit-btn").classList.toggle("active", !fill);
+        document.getElementById("fill-btn").classList.toggle("active", fill);
+        document.getElementById("fit-btn").setAttribute("aria-pressed", String(!fill));
+        document.getElementById("fill-btn").setAttribute("aria-pressed", String(fill));
+        // Clear inline sizing from the fit-mode logic; CSS handles it.
+        player.style.width = "";
+        player.style.height = "";
+        player.style.marginLeft = "";
+        player.style.marginRight = "";
+        player.style.objectFit = "";
+        if (!fill) fitVideo(player);
+    }
     player.classList.remove("video-fill");
-    document.getElementById("fit-btn").onclick = function () {
-        player.classList.remove("video-fill");
-    };
-    document.getElementById("fill-btn").onclick = function () {
-        player.classList.add("video-fill");
-    };
+    wrap.classList.remove("fill-active");
+    document.getElementById("fit-btn").onclick = function () { setFill(false); };
+    document.getElementById("fill-btn").onclick = function () { setFill(true); };
+    setFill(false);
     document.getElementById("delete-video-btn").onclick = function () {
         if (!session.authenticated) return;
         if (!confirm("Delete " + v.title + "?")) return;
-        fetch("/api/videos/" + v.id, { method: "DELETE" }).then(function () {
-            activate("library");
+        var err = document.getElementById("video-delete-error");
+        if (err) err.textContent = "";
+        fetch("/api/videos/" + v.id, { method: "DELETE" }).then(function (r) {
+            if (r.ok) {
+                activate("library");
+                return;
+            }
+            // Keep the video visible and surface the failure (e.g. the file
+            // could not be removed — likely a permissions problem).
+            r.json().catch(function () { return {}; }).then(function (d) {
+                if (err) err.textContent = "Delete failed: " + (d.error || "unknown error");
+            });
         });
     };
     // Resume playback from last position (resume playback feature).
@@ -386,7 +447,116 @@ function loadVideo(id) {
     loadPlayer(player, v, meta);
     fitVideo(player);
     updateDeleteButtons();
+    updateCastSection();
     activate("video");
+}
+
+// ---------------------------------------------------------------------------
+// UPnP/Sonos casting (Phase 2)
+// ---------------------------------------------------------------------------
+
+// Load the list of discovered UPnP renderers and populate the speaker select.
+function loadSpeakers() {
+    fetchJson("/api/speakers").then(function (j) {
+        speakers = j.speakers || [];
+        const el = document.getElementById("cast-speaker");
+        if (speakers.length === 0) {
+            el.innerHTML = '<option value="">No speakers found</option>';
+            el.disabled = false;
+            updateCastSection();
+            return;
+        }
+        el.innerHTML = speakers.map(function (s) {
+            const status = s.online ? "" : " (offline)";
+            return '<option value="' + esc(s.id) + '">' + esc(s.name) + status + "</option>";
+        }).join("");
+        el.disabled = false;
+        updateCastSection();
+    }).catch(function () {
+        const el = document.getElementById("cast-speaker");
+        el.innerHTML = '<option value="">No speakers found</option>';
+        el.disabled = false;
+        updateCastSection();
+    });
+}
+
+// Show a short "last seen" line for the selected speaker.
+function updateCastSection() {
+    const cast = document.getElementById("video-cast");
+    const btn = document.getElementById("cast-btn");
+    const seenEl = document.getElementById("cast-last-seen");
+    if (!cast) return;
+    if (!session.authenticated || !currentVideo) {
+        cast.style.display = "none";
+        if (btn) btn.disabled = false;
+        return;
+    }
+    cast.style.display = "block";
+    if (seenEl) {
+        const id = document.getElementById("cast-speaker").value;
+        const s = speakers.find(function (x) { return x.id === id; });
+        seenEl.textContent = s
+            ? "Last seen: " + ago(s.last_seen) + (s.online ? " — online" : " — offline")
+            : "";
+    }
+    if (btn) {
+        const id = document.getElementById("cast-speaker").value;
+        const s = speakers.find(function (x) { return x.id === id; });
+        btn.disabled = !s || !s.online;
+    }
+}
+
+function ago(epochSeconds) {
+    const now = Math.floor(Date.now() / 1000);
+    const secs = Math.max(0, now - epochSeconds);
+    if (secs < 60) return secs + "s ago";
+    if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+    return Math.floor(secs / 3600) + "h ago";
+}
+
+// Wire up the volume slider display.
+function updateCastVolumeDisplay() {
+    document.getElementById("cast-volume-value").textContent = castVolume;
+}
+
+// Cast the current video's pre-baked audio to the selected speaker.
+function castToSpeaker() {
+    const speakerId = document.getElementById("cast-speaker").value;
+    if (!speakerId) {
+        document.getElementById("cast-error").textContent = "Select a speaker.";
+        return;
+    }
+    if (!currentVideo) {
+        document.getElementById("cast-error").textContent = "No video selected.";
+        return;
+    }
+    const errorEl = document.getElementById("cast-error");
+    const btn = document.getElementById("cast-btn");
+    const oldText = btn.textContent;
+    btn.textContent = "Casting…";
+    btn.disabled = true;
+    errorEl.textContent = "";
+    fetch("/api/cast/" + encodeURIComponent(currentVideo.id) + "/" + encodeURIComponent(speakerId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ volume: castVolume })
+    }).then(function (r) {
+        if (!r.ok) {
+            if (r.status === 401) throw new Error("Casting requires admin login — log in first.");
+            if (r.status === 409) throw new Error("That speaker is offline — try another or wait for it to wake up.");
+            throw new Error("HTTP " + r.status);
+        }
+        return r.json();
+    }).then(function () {
+        errorEl.textContent = "Casting to speaker.";
+        errorEl.className = "success";
+    }).catch(function (e) {
+        errorEl.textContent = e.message;
+        errorEl.className = "error";
+    }).finally(function () {
+        btn.textContent = oldText;
+        updateCastSection();
+    });
 }
 
 function savePosition(id, position) {
@@ -556,32 +726,66 @@ function loadSettings() {
     fetchJson("/api/settings").then(function (s) {
         settings = s;
         document.getElementById("watch-dirs").value = s.watch_dirs.join(", ");
+        document.getElementById("data-dir").value = s.data_dir;
+        document.getElementById("scan-interval").value = s.scan_interval_s;
+        document.getElementById("youtube-download-dir").value = (s.youtube_download_dir || "");
         document.getElementById("anonymous-view").checked = s.anonymous_view;
         document.getElementById("convert-quality").value = s.convert_quality;
         document.getElementById("convert-format").value = s.default_convert_format;
         document.getElementById("convert-all").checked = s.convert_all;
+        document.getElementById("upnp-enabled").checked = s.upnp.enabled;
+        document.getElementById("upnp-discovery-interval").value = s.upnp.discovery_interval_s;
+        document.getElementById("upnp-server-ip").value = s.upnp.server_ip;
         document.getElementById("playback-formats").textContent = s.playback_supported_formats.join(", ");
         document.getElementById("target-formats").textContent = s.convert_target_formats.join(", ");
     });
 }
 
+function currentSettingsFormValues() {
+    const dirs = document.getElementById("watch-dirs").value
+        .split(",").map(s => s.trim()).filter(Boolean);
+    const ytd = document.getElementById("youtube-download-dir").value.trim();
+    const upnpEnabled = document.getElementById("upnp-enabled").checked;
+    const serverIp = document.getElementById("upnp-server-ip").value.trim();
+    return {
+        watch_dirs: dirs,
+        data_dir: document.getElementById("data-dir").value.trim(),
+        scan_interval_s: parseInt(document.getElementById("scan-interval").value, 10),
+        anonymous_view: document.getElementById("anonymous-view").checked,
+        youtube_download_dir: ytd || null,
+        convert_quality: document.getElementById("convert-quality").value,
+        default_convert_format: document.getElementById("convert-format").value,
+        convert_all: document.getElementById("convert-all").checked,
+        upnp: {
+            enabled: upnpEnabled,
+            discovery_interval_s: parseInt(document.getElementById("upnp-discovery-interval").value, 10),
+            server_ip: upnpEnabled ? serverIp : ""
+        }
+    };
+}
+
 // Save a modified copy of the current settings (the API expects a full object).
-function saveSettings(modifier, errorElId) {
-    if (!settings) return;
-    const newSettings = Object.assign({}, settings);
-    modifier(newSettings);
-    fetch("/api/settings", {
+function saveSettings(payload, errorElId) {
+    const err = document.getElementById(errorElId);
+    err.textContent = "";
+    return fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newSettings)
+        body: JSON.stringify(payload)
     }).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
-    }).then(function () {
-        if (errorElId) document.getElementById(errorElId).textContent = "";
-        loadSettings();
-    }).catch(function (e) {
-        if (errorElId) document.getElementById(errorElId).textContent = e.message;
+        const text = r.text();
+        return text.then(function (body) {
+            let json = null;
+            try { json = JSON.parse(body); } catch (_) {}
+            if (!r.ok) {
+                const msg = (json && json.error) || (r.statusText || "HTTP " + r.status);
+                err.textContent = "Error: " + msg;
+                throw new Error(msg);
+            }
+            loadSettings();
+        });
+    }).catch(function () {
+        if (err.textContent === "") err.textContent = "Error: could not reach the server.";
     });
 }
 
@@ -641,21 +845,33 @@ function updateDeleteButtons() {
     const isAdmin = session.authenticated;
     document.getElementById("delete-selected-btn").style.display = isAdmin ? "" : "none";
     document.getElementById("delete-video-btn").style.display = isAdmin ? "" : "none";
+    updateCastSection();
 }
 
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
+function restoreTab() {
+    let saved = "library";
+    try {
+        saved = sessionStorage.getItem("active_tab") || "library";
+    } catch (e) {}
+    saved = AppLogic.restoreSavedTab(saved);
+    activate(saved);
+}
+
 function init() {
+    restoreTab();
     // Fetch the session so admin-only controls can be shown/hidden.
     fetchJson("/api/session").then(function (j) {
         session = j;
         updateDeleteButtons();
     });
 
-    document.getElementById("search-input").addEventListener("input", applyFilters);
-    document.getElementById("codec-filter").addEventListener("input", applyFilters);
+    const debouncedFilter = AppLogic.debounce(applyFilters, 150);
+    document.getElementById("search-input").addEventListener("input", debouncedFilter);
+    document.getElementById("codec-filter").addEventListener("input", debouncedFilter);
     document.getElementById("fav-filter").addEventListener("change", applyFilters);
     document.getElementById("sort-by").addEventListener("change", function () {
         sortState.by = this.value;
@@ -729,21 +945,14 @@ function init() {
             btn.disabled = false;
         });
     });
-    document.getElementById("save-watch-dirs").addEventListener("click", () => {
-        const dirs = document.getElementById("watch-dirs").value.split(",").map(s => s.trim()).filter(Boolean);
-        saveSettings((s) => { s.watch_dirs = dirs; }, "watch-dirs-error");
-    });
-    document.getElementById("save-anonymous").addEventListener("click", () => {
-        saveSettings((s) => { s.anonymous_view = document.getElementById("anonymous-view").checked; }, "anonymous-error");
-    });
-    document.getElementById("save-convert-quality").addEventListener("click", () => {
-        saveSettings((s) => { s.convert_quality = document.getElementById("convert-quality").value; }, "convert-quality-error");
-    });
-    document.getElementById("save-convert-format").addEventListener("click", () => {
-        saveSettings((s) => { s.default_convert_format = document.getElementById("convert-format").value; }, "convert-format-error");
-    });
-    document.getElementById("save-convert-all").addEventListener("click", () => {
-        saveSettings((s) => { s.convert_all = document.getElementById("convert-all").checked; }, "convert-all-error");
+    document.getElementById("save-settings").addEventListener("click", () => {
+        const payload = currentSettingsFormValues();
+        if (!payload.data_dir || !payload.scan_interval_s || payload.watch_dirs.length === 0) {
+            document.getElementById("settings-error").textContent =
+                "Error: watch dirs, a data dir, and a scan interval are required.";
+            return;
+        }
+        saveSettings(payload, "settings-error");
     });
 
     // Fit players when their metadata loads or the window resizes.
@@ -801,12 +1010,22 @@ function init() {
         }
     });
 
-    renderLibrary();
-    loadPlaylists();
     setInterval(renderLibrary, 60000);
     // Conversion queue notification (#11).
     pollConversions();
     setInterval(pollConversions, 5000);
+
+    // UPnP/Sonos casting (Phase 2): refresh speakers and wire the cast UI.
+    loadSpeakers();
+    setInterval(loadSpeakers, 15000);
+    document.getElementById("cast-speaker").addEventListener("change", function () {
+        updateCastSection();
+    });
+    document.getElementById("cast-volume").addEventListener("input", function () {
+        castVolume = parseInt(this.value, 10);
+        updateCastVolumeDisplay();
+    });
+    document.getElementById("cast-btn").addEventListener("click", castToSpeaker);
 }
 
 init();

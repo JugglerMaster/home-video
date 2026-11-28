@@ -5,3 +5,4 @@ pub mod hls;
 pub mod import;
 pub mod ingest;
 pub mod server;
+pub mod upnp;

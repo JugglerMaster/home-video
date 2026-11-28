@@ -35,6 +35,7 @@ pub struct Video {
     pub thumbnail_path: String,
     pub playback_position: f64,
     pub favorite: bool,
+    pub audio_path: String,
 }
 
 fn now() -> String {
@@ -109,6 +110,7 @@ impl Db {
         // Migrate existing databases: add new columns if they are missing.
         self.add_column_if_missing("videos", "playback_position", "REAL NOT NULL DEFAULT 0")?;
         self.add_column_if_missing("videos", "favorite", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("videos", "audio_path", "TEXT")?;
         // Create indexes (after migration, so existing DBs have the columns).
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_video ON queue(video_id)", [])?;
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_favorite ON videos(favorite)", [])?;
@@ -143,7 +145,7 @@ impl Db {
     fn add_column_if_missing(&self, table: &str, column: &str, type_def: &str) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
         let rows = stmt.query_map([], |row| {
-            Ok(row.get::<_, String>(0)?)
+            row.get::<_, String>(0)
         })?;
         let mut out = Vec::new();
         for r in rows {
@@ -162,8 +164,8 @@ impl Db {
             "INSERT INTO videos (
                 fingerprint, path, title, description, tags,
                 duration, resolution, codec, size, bitrate,
-                created_at, updated_at, hls_m3u8, thumbnail_path
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                created_at, updated_at, hls_m3u8, thumbnail_path, audio_path
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 video.fingerprint,
                 video.path,
@@ -179,6 +181,7 @@ impl Db {
                 video.updated_at,
                 video.hls_m3u8,
                 video.thumbnail_path,
+                video.audio_path,
             ],
         )?;
         Ok(self.conn.last_insert_rowid() as u64)
@@ -217,6 +220,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
+                audio_path: row.get(17)?,
             })
         })?;
         let mut out = Vec::new();
@@ -261,6 +265,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
+                audio_path: row.get(17)?,
             })
         })?;
         let mut out = Vec::new();
@@ -340,6 +345,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
+                audio_path: row.get(17)?,
             })
         })?;
         let mut out = Vec::new();
@@ -355,15 +361,21 @@ impl Db {
         Ok(())
     }
 
-    /// Delete a video row and its playlist items. Returns the number of rows
-    /// removed from `videos` (0 if the video did not exist).
+    /// Delete a video row, its playlist items, and anything in the queue
+    /// referencing it. Returns the number of rows removed from `videos`
+    /// (0 if the video did not exist).
     pub fn delete_video(&self, id: u64) -> anyhow::Result<u64> {
         // Remove playlist items referencing this video.
         self.conn.execute(
             "DELETE FROM playlist_items WHERE video_id = ?1",
             params![id],
         )?;
-        // Remove the video row.
+        // Remove queue entries referencing this video.
+        self.conn.execute(
+            "DELETE FROM queue WHERE video_id = ?1",
+            params![id],
+        )?;
+        // Remove the video row (FTS sync triggers handle the search index).
         let mut stmt = self.conn.prepare("DELETE FROM videos WHERE id = ?1")?;
         let n: usize = stmt.execute(params![id])?;
         Ok(n as u64)
@@ -372,7 +384,7 @@ impl Db {
     /// Get a video by id. Returns `None` if the video does not exist.
     pub fn get_video_by_id(&self, id: u64) -> anyhow::Result<Option<Video>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, fingerprint, path, title, description, tags, duration, resolution, codec, size, bitrate, created_at, updated_at, hls_m3u8, thumbnail_path, playback_position, favorite FROM videos WHERE id = ?1",
+            "SELECT id, fingerprint, path, title, description, tags, duration, resolution, codec, size, bitrate, created_at, updated_at, hls_m3u8, thumbnail_path, playback_position, favorite, audio_path FROM videos WHERE id = ?1",
         )?;
         match stmt.query_row(params![id], |row| {
             Ok(Video {
@@ -393,6 +405,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
+                audio_path: row.get(17)?,
             })
         }) {
             Ok(v) => Ok(Some(v)),
@@ -413,10 +426,10 @@ impl Db {
     }
 
     /// Update the hls_m3u8 and thumbnail_path for a video.
-    pub fn update_paths(&self, id: u64, hls_m3u8: &str, thumbnail_path: &str) -> anyhow::Result<()> {
+    pub fn update_paths(&self, id: u64, hls_m3u8: &str, thumbnail_path: &str, audio_path: &str) -> anyhow::Result<()> {
         self.conn.execute(
-            "UPDATE videos SET hls_m3u8 = ?1, thumbnail_path = ?2, updated_at = ?3 WHERE id = ?4",
-            params![hls_m3u8, thumbnail_path, now(), id],
+            "UPDATE videos SET hls_m3u8 = ?1, thumbnail_path = ?2, audio_path = ?3, updated_at = ?4 WHERE id = ?5",
+            params![hls_m3u8, thumbnail_path, audio_path, now(), id],
         )?;
         Ok(())
     }
@@ -496,6 +509,7 @@ impl Db {
                 thumbnail_path: row.get(14)?,
                 playback_position: row.get(15)?,
                 favorite: row.get(16)?,
+                audio_path: row.get(17)?,
             })
         })?;
         let mut out = Vec::new();
@@ -560,3 +574,228 @@ impl Db {
 
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_video(title: &str, fp: &str) -> Video {
+        Video {
+            id: 0,
+            fingerprint: fp.to_string(),
+            path: format!("/x/{}.mp4", title),
+            title: title.to_string(),
+            description: String::new(),
+            tags: String::new(),
+            duration: 1.0,
+            resolution: "1x1".to_string(),
+            codec: "h264".to_string(),
+            size: 1,
+            bitrate: 1,
+            created_at: "0".to_string(),
+            updated_at: "0".to_string(),
+            hls_m3u8: String::new(),
+            thumbnail_path: String::new(),
+            playback_position: 0.0,
+            favorite: false,
+            audio_path: String::new(),
+        }
+    }
+
+    fn make_db() -> (Db, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::new(&path).unwrap();
+        db.create_schema().unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn insert_and_get_by_id() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        let v = db.get_video_by_id(id).unwrap().expect("video row must exist");
+        assert_eq!(v.title, "Alpha");
+        assert_eq!(v.fingerprint, "fp-a");
+    }
+
+    #[test]
+    fn get_by_id_returns_none_for_unknown_id() {
+        let (db, _dir) = make_db();
+        assert!(db.get_video_by_id(42).unwrap().is_none());
+    }
+
+    #[test]
+    fn find_by_fingerprint_matches_and_misses() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        assert_eq!(db.find_by_fingerprint("fp-a").unwrap(), Some(id));
+        assert!(db.find_by_fingerprint("fp-no").unwrap().is_none());
+    }
+
+    #[test]
+    fn sorted_desc_by_default_and_by_title_asc() {
+        let (db, _dir) = make_db();
+        db.insert_video(&sample_video("Gamma", "fp-c")).unwrap();
+        db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.insert_video(&sample_video("Beta", "fp-b")).unwrap();
+
+        let titles_asc = db.get_videos_sorted("title", "asc").unwrap();
+        let titles: Vec<&str> = titles_asc.iter().map(|v| v.title.as_str()).collect();
+        assert_eq!(titles, vec!["Alpha", "Beta", "Gamma"]);
+
+        let default = db.get_videos_sorted("title", "desc").unwrap();
+        let default_titles: Vec<&str> = default.iter().map(|v| v.title.as_str()).collect();
+        assert_eq!(default_titles, vec!["Gamma", "Beta", "Alpha"]);
+    }
+
+    #[test]
+    fn sorted_unknown_sort_falls_back_to_date() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        let v = db.get_videos_sorted("nonsense", "desc").unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, id);
+    }
+
+    #[test]
+    fn search_videos_finds_by_title_and_tags() {
+        let (db, _dir) = make_db();
+        db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.insert_video(&sample_video("Beta", "fp-b")).unwrap();
+        assert_eq!(db.search_videos("Alpha").unwrap().len(), 1);
+        assert_eq!(db.search_videos("Beta").unwrap().len(), 1);
+        assert!(db.search_videos("zzz").unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_video_changes_title_description_and_tags() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.update_video(id, "Renamed", "some description", "some,tags").unwrap();
+        let v = db.get_video_by_id(id).unwrap().unwrap();
+        assert_eq!(v.title.as_str(), "Renamed");
+        assert_eq!(v.description.as_str(), "some description");
+        assert_eq!(v.tags.as_str(), "some,tags");
+    }
+
+    #[test]
+    fn toggle_favorite_flips_flag_twice() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.toggle_favorite(id).unwrap();
+        assert!(db.get_video_by_id(id).unwrap().unwrap().favorite);
+        db.toggle_favorite(id).unwrap();
+        assert!(!db.get_video_by_id(id).unwrap().unwrap().favorite);
+    }
+
+    #[test]
+    fn update_position_sets_playback_position() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.update_position(id, 42.5).unwrap();
+        assert_eq!(db.get_video_by_id(id).unwrap().unwrap().playback_position, 42.5);
+    }
+
+    #[test]
+    fn queue_assigns_incremental_positions_and_remove_works() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        let q1 = db.add_to_queue(id).unwrap();
+        let _q2 = db.add_to_queue(id).unwrap(); // second entry, same video again
+        let queue = db.get_queue().unwrap();
+        assert_eq!(queue.len(), 2);
+
+        db.remove_from_queue(q1).unwrap();
+        let queue = db.get_queue().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+        assert_ne!(db.get_queue().unwrap()[0].fingerprint.as_str(), "deleted");
+    }
+
+    #[test]
+    fn delete_video_removes_queue_and_playlist_items_and_row() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.add_to_queue(id).unwrap();
+
+        // playlists: create + add a row
+        let playlist_id = db.create_manual_playlist("playlist one").unwrap();
+        db.add_playlist_item(playlist_id, id, 1).unwrap();
+
+        // remove the video: both the queue entry and the playlist item go away
+        let removed = db.delete_video(id).unwrap();
+        assert_eq!(removed, 1);
+        assert!(db.get_videos_sorted("date", "desc").unwrap().is_empty());
+        assert!(db.get_queue().unwrap().is_empty());
+        assert!(db.get_videos_by_playlist(playlist_id).unwrap().is_empty());
+        assert_eq!(db.playlist_count(playlist_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_video_returns_zero_for_missing_id() {
+        let (db, _dir) = make_db();
+        assert_eq!(db.delete_video(999).unwrap(), 0);
+    }
+
+    #[test]
+    fn update_paths_sets_audio_and_hls_paths() {
+        let (db, _dir) = make_db();
+        let id = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.update_paths(id, "hls/x.m3u8", "thumbnails/x.jpg", "audio/x.m4a").unwrap();
+        let v = db.get_video_by_id(id).unwrap().unwrap();
+        assert_eq!(v.hls_m3u8.as_str(), "hls/x.m3u8");
+        assert_eq!(v.thumbnail_path.as_str(), "thumbnails/x.jpg");
+        assert_eq!(v.audio_path.as_str(), "audio/x.m4a");
+    }
+
+    #[test]
+    fn playlist_crud_and_cascade_delete_works() {
+        let (db, _dir) = make_db();
+        let playlist_id = db.create_playlist("First", "manual", None).unwrap();
+        let v1 = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        let v2 = db.insert_video(&sample_video("Beta", "fp-b")).unwrap();
+        db.add_playlist_item(playlist_id, v1, 1).unwrap();
+        db.add_playlist_item(playlist_id, v2, 2).unwrap();
+
+        // get_videos_by_playlist orders by position
+        let videos = db.get_videos_by_playlist(playlist_id).unwrap();
+        assert_eq!(videos.len(), 2);
+        assert_eq!(videos[0].id, v1);
+        assert_eq!(videos[1].id, v2);
+
+        // Rename
+        db.rename_playlist(playlist_id, "Renamed").unwrap();
+        assert_eq!(db.get_playlist(playlist_id).unwrap().unwrap().name, "Renamed");
+
+        // Remove one item
+        db.remove_playlist_item(playlist_id, v1).unwrap();
+        assert_eq!(db.get_videos_by_playlist(playlist_id).unwrap().len(), 1);
+
+        // Cascade delete removes items and the playlist
+        db.delete_playlist(playlist_id).unwrap();
+        assert!(db.get_playlist(playlist_id).unwrap().is_none());
+        assert!(db.get_videos_by_playlist(playlist_id).unwrap().is_empty());
+        assert!(!db.get_playlists().unwrap().iter().any(|p| p.id == playlist_id));
+    }
+
+    #[test]
+    fn playlists_are_listed_newest_first() {
+        let (db, _dir) = make_db();
+        let p1 = db.create_playlist("First", "manual", None).unwrap();
+        let p2 = db.create_playlist("Second", "manual", None).unwrap();
+        let playlists = db.get_playlists().unwrap();
+        assert_eq!(playlists[0].id, p2, "newest first");
+        assert_eq!(playlists[1].id, p1);
+    }
+
+    #[test]
+    fn add_playlist_item_is_idempotent() {
+        let (db, _dir) = make_db();
+        let playlist_id = db.create_playlist("First", "manual", None).unwrap();
+        let v = db.insert_video(&sample_video("Alpha", "fp-a")).unwrap();
+        db.add_playlist_item(playlist_id, v, 1).unwrap();
+        db.add_playlist_item(playlist_id, v, 1).unwrap(); // no-op
+        assert_eq!(db.playlist_count(playlist_id).unwrap(), 1);
+    }
+}

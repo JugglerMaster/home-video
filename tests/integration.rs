@@ -4,7 +4,7 @@
 // Uses real ffmpeg/ffprobe (present in the runtime image and dev env) and a
 // real temp DB, so these catch regressions in the external-binary paths.
 
-use home_video::{config::Config, db::Db, ingest, server::AppState};
+use home_video::{config::Config, db::Db, ingest, server::AppState, upnp};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -78,12 +78,18 @@ fn make_state(data_dir: PathBuf, db: Db) -> AppState {
                 convert_quality: "medium".to_string(),
                 default_convert_format: "h264".to_string(),
                 convert_all: true,
+                upnp: home_video::config::UpnpSettings {
+                    enabled: false,
+                    discovery_interval_s: 30,
+                    server_ip: String::new(),
+                },
             };
             Arc::new(Mutex::new(Some(cfg)))
         },
         sessions: Arc::new(Mutex::new(HashSet::new())),
         db: Arc::new(Mutex::new(Some(db))),
         conversions: Arc::new(Mutex::new(Vec::new())),
+        speakers: Arc::new(upnp::SpeakerStore::new()),
     }
 }
 
@@ -345,3 +351,4 @@ async fn full_ingest_dedupe_skips_existing_fingerprint() {
         .len();
     assert_eq!(count, 1, "expected 1 video, got {count}");
 }
+

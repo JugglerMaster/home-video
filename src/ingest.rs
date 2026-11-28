@@ -91,16 +91,22 @@ impl ConvertSettings {
         Self::needs_conversion(codec) && self.convert_all
     }
 
-    /// Build the ffmpeg args for converting `codec` to `target_format` at the
+    /// Build the ffmpeg args for converting to `target_format` at the
     /// configured quality. Returns None if the target format is unsupported.
-    pub fn convert_args(&self, _codec: &str) -> Option<Vec<String>> {
-        if !CONVERT_TARGET_FORMATS.contains(&self.target_format.as_str()) {
+    pub fn convert_args(&self) -> Option<Vec<String>> {
+        if !self.valid_target() {
             return None;
         }
         let (crf, preset) = self.crf_preset();
+        // HEVC uses libx265; h264 uses libx264.
+        let encoder = if self.target_format == "hevc" {
+            "libx265"
+        } else {
+            "libx264"
+        };
         Some(
             [
-                "-c:v", "libx264", "-crf", &crf, "-preset", &preset,
+                "-c:v", encoder, "-crf", &crf, "-preset", &preset,
                 "-c:a", "aac", "-b:a", "192k",
             ]
             .iter()
@@ -310,7 +316,7 @@ pub fn hls(src: &Path, out_dir: &Path, codec: &str, settings: &ConvertSettings) 
     if COPY_STREAM_CODECS.contains(&codec) {
         args.extend(["-c".into(), "copy".into()]);
     } else if settings.should_convert(codec) {
-        match settings.convert_args(codec) {
+        match settings.convert_args() {
             Some(extra) => args.extend(extra),
             None => {
                 let target = settings.target_format.clone();
@@ -351,6 +357,48 @@ pub fn hls(src: &Path, out_dir: &Path, codec: &str, settings: &ConvertSettings) 
     Ok(())
 }
 
+/// Generate a direct audio file (AAC 192k, `.m4a`) under `out_dir` for casting
+/// to UPnP/Sonos renderers (docs/plans/upnp-sonos-casting.md).
+///
+/// Audio-only, matching the web player's AAC 192k quality. Returns the relative
+/// filename on success, `None` on failure (best-effort: a failed bake must not
+/// abort ingest). The source is read-only; the output goes to `out_dir`.
+fn bake_audio(src: &Path, out_dir: &Path, video_id: u64) -> Result<Option<String>> {
+    let out_path = out_dir.join(format!("{video_id}.m4a"));
+    let args = [
+        "-y".to_string(),
+        "-i".to_string(),
+        src.display().to_string(),
+        "-vn".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        "192k".to_string(),
+        out_path.display().to_string(),
+    ];
+    let output = std::process::Command::new("ffmpeg")
+        .current_dir(out_dir)
+        .args(&args)
+        .output()
+        .context("ffmpeg audio")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    // ffmpeg exits 0 even when it produces no frame; verify the file is real.
+    let ok = out_path.exists()
+        && out_path
+            .metadata()
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+    if !ok {
+        eprintln!(
+            "audio bake produced no file for {video_id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(if ok { Some(format!("{video_id}.m4a")) } else { None })
+}
+
 /// Ingest a single video file into the app.
 pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Result<Option<u64>> {
     let fp = fingerprint(path)?;
@@ -387,8 +435,10 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
     };
     let hls_dir = PathBuf::from(&data_dir).join("hls");
     let thumb_dir = PathBuf::from(&data_dir).join("thumbnails");
+    let audio_dir = PathBuf::from(&data_dir).join("audio");
     fs::create_dir_all(&hls_dir)?;
     fs::create_dir_all(&thumb_dir)?;
+    fs::create_dir_all(&audio_dir)?;
 
     // Insert (placeholder paths) to get an ID.
     let now = now();
@@ -414,6 +464,7 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
                     thumbnail_path: String::new(),
                     playback_position: 0.0,
                     favorite: false,
+                    audio_path: String::new(),
                 };
                 db.insert_video(&v)?
             }
@@ -437,6 +488,10 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
     let src_owned = path.to_path_buf();
     let hls_dir_id_owned = hls_dir_id.clone();
     let convert_owned = convert.clone();
+    // Audio pre-bake (UPnP/Sonos casting): bake in parallel with HLS.
+    let audio_src_owned = path.to_path_buf();
+    let audio_dir_id_owned = audio_dir.clone();
+    let audio_video_id = video_id;
 
     // Track in-progress conversions so /api/conversions can report them.
     let queue_entry: Option<ConversionItem> = if convert.should_convert(codec.as_str()) {
@@ -451,11 +506,14 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
         None
     };
 
-    let hls_ok = match tokio::task::spawn_blocking(move || {
+    let hls_future = tokio::task::spawn_blocking(move || {
         hls(&src_owned, &hls_dir_id_owned, &codec_owned, &convert_owned)
-    })
-    .await
-    {
+    });
+    let audio_future = tokio::task::spawn_blocking(move || {
+        bake_audio(&audio_src_owned, &audio_dir_id_owned, audio_video_id)
+    });
+
+    let hls_ok = match hls_future.await {
         Ok(inner) => inner.is_ok(),
         Err(e) => {
             eprintln!("video {video_id}: hls join error: {e}");
@@ -467,6 +525,20 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
             "video {video_id}: could not produce playable HLS (codec={codec}); marking unplayable"
         );
     }
+
+    let audio_path = match audio_future.await {
+        Ok(inner) => match inner {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("video {video_id}: audio pre-bake failed: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("video {video_id}: audio join error: {e}");
+            None
+        }
+    };
 
     // Drop from the conversion queue once the step is done (success or fail).
     if let Some(entry) = &queue_entry {
@@ -480,7 +552,8 @@ pub async fn ingest(state: &AppState, path: &Path, title: Option<&str>) -> Resul
         if let Some(db) = &*db_guard {
             let m3u8 = if hls_ok { format!("{video_id}/playlist.m3u8") } else { String::new() };
             let thumb = if thumb_ok { format!("{video_id}.jpg") } else { String::new() };
-            db.update_paths(video_id, &m3u8, &thumb)?;
+            let audio = audio_path.unwrap_or_default();
+            db.update_paths(video_id, &m3u8, &thumb, &audio)?;
         }
     }
 
@@ -509,4 +582,96 @@ pub async fn scan(state: &AppState) -> Result<usize> {
         }
     }
     Ok(ingested)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(quality: &str, target: &str, convert_all: bool) -> ConvertSettings {
+        ConvertSettings {
+            quality: quality.to_string(),
+            target_format: target.to_string(),
+            convert_all,
+        }
+    }
+
+    #[test]
+    fn needs_conversion_for_non_playback_codec() {
+        assert!(!ConvertSettings::needs_conversion("h264"));
+        assert!(!ConvertSettings::needs_conversion("hevc"));
+        assert!(ConvertSettings::needs_conversion("mpeg4"));
+        assert!(ConvertSettings::needs_conversion(""));
+    }
+
+    #[test]
+    fn should_convert_respects_convert_all_flag() {
+        // convert_all = off must NOT re-encode non-playback codecs.
+        assert!(!settings("medium", "h264", false).should_convert("mpeg4"));
+        // convert_all = on must re-encode.
+        assert!(settings("medium", "h264", true).should_convert("mpeg4"));
+        // Playback-supported codecs are always left alone.
+        assert!(!settings("medium", "h264", true).should_convert("h264"));
+    }
+
+    #[test]
+    fn crf_preset_matches_quality_and_falls_back_to_medium() {
+        assert_eq!(settings("low", "h264", true).crf_preset(), ("28".to_string(), "veryfast".to_string()));
+        assert_eq!(settings("medium", "h264", true).crf_preset(), ("23".to_string(), "medium".to_string()));
+        assert_eq!(settings("high", "h264", true).crf_preset(), ("18".to_string(), "slow".to_string()));
+        // Unknown quality string falls back to medium.
+        assert_eq!(settings("ultra", "h264", true).crf_preset(), ("23".to_string(), "medium".to_string()));
+    }
+
+    #[test]
+    fn valid_target_rejects_unknown_formats() {
+        assert!(settings("medium", "h264", true).valid_target());
+        assert!(settings("medium", "hevc", true).valid_target());
+        assert!(!settings("medium", "mpeg4", true).valid_target());
+        assert!(!settings("medium", "", true).valid_target());
+    }
+
+    #[test]
+    fn convert_args_follow_target_format() {
+        let h264 = settings("high", "h264", true).convert_args().unwrap();
+        assert!(h264.iter().any(|a| a == "libx264"));
+        assert!(!h264.iter().any(|a| a == "libx265"));
+        assert!(h264.iter().any(|a| a == "18"));
+        assert!(h264.iter().any(|a| a == "slow"));
+
+        let hevc = settings("low", "hevc", true).convert_args().unwrap();
+        assert!(hevc.iter().any(|a| a == "libx265"));
+        assert!(!hevc.iter().any(|a| a == "libx264"));
+        assert!(hevc.iter().any(|a| a == "28"));
+
+        // Invalid target -> no args.
+        assert!(settings("medium", "mpeg4", true).convert_args().is_none());
+    }
+
+    #[test]
+    fn from_config_builds_settings() {
+        let cfg = crate::config::Config {
+            port: 8080,
+            watch_dirs: vec!["/tmp/watch".to_string()],
+            youtube_download_dir: String::new(),
+            data_dir: "/tmp/data".to_string(),
+            scan_interval_s: 5,
+            anonymous_view: false,
+            admin_password_hash: String::new(),
+            version_check_url: String::new(),
+            convert_quality: "high".to_string(),
+            default_convert_format: "hevc".to_string(),
+            convert_all: false,
+            upnp: crate::config::UpnpSettings {
+                enabled: false,
+                discovery_interval_s: 30,
+                server_ip: String::new(),
+            },
+        };
+        let settings = ConvertSettings::from_config(&cfg);
+        assert_eq!(settings.quality, "high");
+        assert_eq!(settings.target_format, "hevc");
+        assert!(!settings.convert_all);
+    }
 }
